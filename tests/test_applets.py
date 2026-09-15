@@ -219,3 +219,32 @@ def test_less_syntax_never_colors_non_tty_output(tmp_path):
     assert r.code==0;
     assert r.out=="ERROR failed\n";
     assert "\x1b[" not in r.out;
+
+
+def test_ls_long_columns_align_and_human_sizes_match_gnu_shape(tmp_path):
+    small=tmp_path/"small.txt"; small.write_bytes(b"x"*49);
+    large=tmp_path/"large.bin"; large.write_bytes(b"x"*4096);
+    (tmp_path/"adir").mkdir();
+    shell=ShellRuntime(cwd=tmp_path);
+    result=run_applet("ls",["-lah"],runtime=shell);
+    assert result.code==0;
+    lines=result.out.splitlines();
+    assert lines[0].startswith("total ");
+    assert lines[0].split()[1][-1:] in ("K","M","G","T","P","E") or lines[0].split()[1].isdigit();
+    small_line=next(line for line in lines if line.endswith(" small.txt"));
+    large_line=next(line for line in lines if line.endswith(" large.bin"));
+    # Human-readable sizes use coreutils-like spelling and share a right edge.
+    assert "4.0K" in large_line;
+    assert "49" in small_line;
+    assert large_line.index("4.0K")+len("4.0K")==small_line.index("49")+len("49");
+
+
+def test_ls_long_raw_size_column_is_right_aligned(tmp_path):
+    (tmp_path/"a").write_bytes(b"x"*7);
+    (tmp_path/"b").write_bytes(b"x"*1234);
+    shell=ShellRuntime(cwd=tmp_path);
+    result=run_applet("ls",["-la"],runtime=shell);
+    lines=result.out.splitlines();
+    a_line=next(line for line in lines if line.endswith(" a"));
+    b_line=next(line for line in lines if line.endswith(" b"));
+    assert b_line.index("1234")+4==a_line.index("7")+1;

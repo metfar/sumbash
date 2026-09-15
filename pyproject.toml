@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sumbash"
-version = "0.1.0a10"
+version = "0.1.0a11"
 description = "Portable SUM shell and BusyBox-style multicall toolbox."
 readme = "README.md"
 requires-python = ">=3.10"

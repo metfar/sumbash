@@ -17,6 +17,7 @@ from dataclasses import dataclass;
 from datetime import datetime, timedelta, timezone;
 import fnmatch;
 import getpass;
+import math;
 import os;
 from pathlib import Path;
 import re;
@@ -162,14 +163,21 @@ def app_sleep(argv, stdin="", runtime=None):
 
 
 def _human_size(value,base=1024):
-    n=float(value);
-    suffixes=("B","K","M","G","T","P","E");
+    """GNU-ls-like compact size used by the portable ls applet.
+
+    Bytes below the first unit are shown without a ``B`` suffix.  Values below
+    10 units retain one decimal place (``4.0K``); larger values are rounded to
+    the nearest whole unit (``67K``).
+    """;
+    n=float(max(0,value));
+    if n<base: return str(int(n));
+    suffixes=("K","M","G","T","P","E");
     for suffix in suffixes:
-        if abs(n)<base or suffix==suffixes[-1]:
-            if suffix=="B": return "{}B".format(int(n));
-            text="{:.1f}".format(n).rstrip("0").rstrip(".");
-            return text+suffix;
         n/=base;
+        if n<base or suffix==suffixes[-1]:
+            if n<10: return "{:.1f}{}".format(n,suffix);
+            return "{}{}".format(int(math.floor(n+0.5)),suffix);
+    return str(int(value));
 
 
 def _parse_ls_colors(value):
@@ -515,23 +523,62 @@ def app_ls(argv, stdin="", runtime=None):
             except (OSError,ValueError,TypeError): pass;
         return "?";
 
-    def long_line(entry):
+    def allocated_bytes(st):
+        return getattr(st,"st_blocks",(st.st_size+511)//512)*512;
+
+    def block_text(st):
+        if opts["human"]: return _human_size(allocated_bytes(st),1000 if opts["si"] else 1024);
+        return str(block_count(st));
+
+    def long_record(entry):
         if "error" in entry: return None;
-        st=entry["st"]; fields=[];
-        if opts["inode"]: fields.append(str(st.st_ino));
-        if opts["blocks"]: fields.append(str(block_count(st)));
-        fields.append(stat.filemode(st.st_mode)); fields.append(str(getattr(st,"st_nlink",1)));
-        owner=_ls_owner(getattr(st,"st_uid",0),opts["numeric"]); group=_ls_group(getattr(st,"st_gid",0),opts["numeric"]);
-        if not opts["no_owner"]: fields.append(owner);
-        if not opts["no_group"]: fields.append(group);
-        if opts["author"]: fields.append(owner);
-        if opts["context"]: fields.append(security_context(entry["path"]));
-        fields.append(scaled_size(st.st_size)); fields.append(_ls_time_text(_ls_time_value(st,opts["time_field"]),opts["time_style"]));
+        st=entry["st"]; owner=_ls_owner(getattr(st,"st_uid",0),opts["numeric"]); group=_ls_group(getattr(st,"st_gid",0),opts["numeric"]);
         name=decorated(entry);
         if entry["path"].is_symlink() and not opts["dereference"]:
             try: name += " -> "+_ls_quote(os.readlink(entry["path"]),opts["quote"]);
             except OSError: pass;
-        fields.append(name); return " ".join(fields);
+        return {
+            "inode":str(st.st_ino),
+            "blocks":block_text(st),
+            "mode":stat.filemode(st.st_mode),
+            "nlink":str(getattr(st,"st_nlink",1)),
+            "owner":owner,
+            "group":group,
+            "author":owner,
+            "context":security_context(entry["path"]),
+            "size":scaled_size(st.st_size),
+            "time":_ls_time_text(_ls_time_value(st,opts["time_field"]),opts["time_style"]),
+            "name":name,
+        };
+
+    def long_lines(entries):
+        records=[r for r in (long_record(e) for e in entries) if r is not None];
+        if not records: return [];
+        numeric_fields=("inode","blocks","nlink","size");
+        text_fields=("owner","group","author","context");
+        widths={key:max(len(r[key]) for r in records) for key in numeric_fields+text_fields};
+        lines=[];
+        for r in records:
+            fields=[];
+            if opts["inode"]: fields.append(r["inode"].rjust(widths["inode"]));
+            if opts["blocks"]: fields.append(r["blocks"].rjust(widths["blocks"]));
+            fields.append(r["mode"]);
+            fields.append(r["nlink"].rjust(widths["nlink"]));
+            if not opts["no_owner"]: fields.append(r["owner"].ljust(widths["owner"]));
+            if not opts["no_group"]: fields.append(r["group"].ljust(widths["group"]));
+            if opts["author"]: fields.append(r["author"].ljust(widths["author"]));
+            if opts["context"]: fields.append(r["context"].ljust(widths["context"]));
+            fields.append(r["size"].rjust(widths["size"]));
+            fields.append(r["time"]);
+            fields.append(r["name"]);
+            lines.append(" ".join(fields));
+        return lines;
+
+    def total_text(entries):
+        if opts["human"]:
+            total=sum(allocated_bytes(e["st"]) for e in entries if "st" in e);
+            return _human_size(total,1000 if opts["si"] else 1024);
+        return str(sum(block_count(e["st"]) for e in entries if "st" in e));
 
     def plain_lines(entries):
         names=[];
@@ -576,11 +623,9 @@ def app_ls(argv, stdin="", runtime=None):
         entries=sort_entries(entries);
         if show_header: out.append("{}:\n".format(label));
         if opts["long"] or opts["blocks"]:
-            total=sum(block_count(e["st"]) for e in entries if "st" in e); out.append("total {}\n".format(total));
+            out.append("total {}\n".format(total_text(entries)));
         if opts["long"]:
-            for e in entries:
-                line=long_line(e);
-                if line is not None: out.append(line+"\n");
+            out.extend(line+"\n" for line in long_lines(entries));
         else: out.append(plain_lines(entries));
         if recursive:
             subs=[e for e in entries if e["name"] not in (".","..") and entry_is_dir(e,for_walk=True)];
@@ -599,7 +644,7 @@ def app_ls(argv, stdin="", runtime=None):
     if files:
         files=sort_entries(files);
         if opts["long"]:
-            for e in files: out.append(long_line(e)+"\n");
+            out.extend(line+"\n" for line in long_lines(files));
         else: out.append(plain_lines(files));
         if dirs: out.append("\n");
     for idx,e in enumerate(dirs):

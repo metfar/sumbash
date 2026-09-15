@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a10.
+"""Small portable shell core for sumbash 0.1.0a11.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
