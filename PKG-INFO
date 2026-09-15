@@ -1,3 +1,21 @@
+Metadata-Version: 2.4
+Name: sumbash
+Version: 0.1.0a2
+Summary: Portable SUM shell and BusyBox-style multicall toolbox.
+Author-email: William Martinez Bas <metfar@gmail.com>
+License-Expression: GPL-2.0-or-later
+Keywords: shell,bash,ksh,unix,busybox,multicall,portable,sum
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: Console
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: System :: Shells
+Classifier: Topic :: Utilities
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: sumcore>=0.1.0a25
+Dynamic: license-file
+
 # sumbash
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.

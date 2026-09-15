@@ -26,3 +26,17 @@ def test_date_day_of_year_and_epoch():
     assert epoch.code==0;
     # Local timezone may offset midnight; the important part here is native %s support.
     int(epoch.out.strip());
+
+
+def test_tty_applet_reports_terminal(monkeypatch):
+    import io;
+    from sumbash.applets import app_tty;
+    class FakeIn(io.StringIO):
+        def isatty(self): return True;
+        def fileno(self): return 7;
+    fake=FakeIn();
+    monkeypatch.setattr("sumbash.applets.sys.stdin",fake);
+    monkeypatch.setattr("sumbash.applets.os.ttyname",lambda fd:"/dev/pts/9");
+    result=app_tty([]);
+    assert result.code==0;
+    assert result.out=="/dev/pts/9\n";

@@ -28,6 +28,7 @@ import os;
 from pathlib import Path;
 import re;
 import shutil;
+import socket;
 import subprocess;
 import sys;
 
@@ -644,10 +645,13 @@ class ShellRuntime:
     # ---------- prompt / script ----------
     def prompt(self):
         ps1=self.get("PS1") or r"\u@\h:\w\$ ";
-        host=(self.get("HOSTNAME") or os.environ.get("HOSTNAME") or "host"); cwd=self.cwd; home=self.get("HOME");
+        host=(self.get("HOSTNAME") or os.environ.get("HOSTNAME") or socket.gethostname() or "host"); cwd=self.cwd; home=self.get("HOME");
         if home and cwd.startswith(home): shown="~"+cwd[len(home):];
         else: shown=cwd;
-        table={r"\u":getpass.getuser(),r"\h":host.split(".",1)[0],r"\H":host,r"\w":shown,r"\W":Path(cwd).name or cwd,r"\$":"#" if hasattr(os,"geteuid") and os.geteuid()==0 else "$",r"\t":datetime.now().strftime("%H:%M:%S"),r"\d":datetime.now().strftime("%a %b %d"),r"\n":"\n",r"\e":"\x1b",r"\[":"",r"\]":""};
+        table={r"\u":getpass.getuser(),r"\h":host.split(".",1)[0],r"\H":host,r"\w":shown,r"\W":Path(cwd).name or cwd,r"\$":"#" if hasattr(os,"geteuid") and os.geteuid()==0 else "$",r"\t":datetime.now().strftime("%H:%M:%S"),r"\d":datetime.now().strftime("%a %b %d"),r"\n":"\n",r"\e":"\x1b",r"\a":"\a",r"\r":"\r",r"\[":"",r"\]":""};
+        # Bash accepts \nnn octal escapes in PS1. This matters for long-lived prompts
+        # that predate the more readable \e spelling (for example \033[...m).
+        ps1=re.sub(r"\\([0-7]{3})",lambda m:chr(int(m.group(1),8)),ps1);
         for key,value in table.items(): ps1=ps1.replace(key,value);
         try: return self.expand_text(ps1);
         except ValueError: return ps1;

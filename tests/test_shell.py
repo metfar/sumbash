@@ -53,3 +53,11 @@ def test_script_keeps_output_from_all_lines(tmp_path):
     result=shell.run_script(str(script));
     assert result.code==0;
     assert result.out=="one\ntwo\n";
+
+
+def test_prompt_supports_octal_ansi_and_hostname_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr("sumbash.shell.socket.gethostname",lambda:"x1b5ca.example");
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"PS1":r"\033[31m \h \[\033[0m\] \w > "},cwd=tmp_path,interactive=True);
+    prompt=shell.prompt();
+    assert prompt.startswith("\x1b[31m x1b5ca \x1b[0m ~ > ");
+    assert "\\033" not in prompt;

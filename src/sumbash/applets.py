@@ -504,6 +504,15 @@ def app_arch(argv, stdin="", runtime=None): return AppletResult(out=(suminfo.col
 def app_whoami(argv, stdin="", runtime=None): return AppletResult(out=getpass.getuser()+"\n");
 
 
+def app_tty(argv, stdin="", runtime=None):
+    """Report the controlling terminal for the current sumbash process.""";
+    if not sys.stdin.isatty(): return AppletResult(1,out="not a tty\n");
+    try: name=os.ttyname(sys.stdin.fileno());
+    except (OSError,AttributeError): return AppletResult(1,out="not a tty\n");
+    if "-s" in argv or "--silent" in argv or "--quiet" in argv: return AppletResult();
+    return AppletResult(out=name+"\n");
+
+
 def app_suminfo(argv, stdin="", runtime=None):
     # Capture suminfo's pure renderer instead of spawning another process.
     if "--short" in argv: return AppletResult(out=suminfo.render_identity_short(suminfo.collect_identity())+"\n");
@@ -547,7 +556,7 @@ APPLETS = {
     "egrep": app_grep, "fgrep": app_grep, "cut": app_cut, "sed": app_sed, "head": app_head,
     "tail": app_tail, "sort": app_sort, "uniq": app_uniq, "wc": app_wc, "tee": app_tee,
     "date": app_date, "uptime": app_uptime, "uname": app_uname, "lsb_release": app_lsb_release,
-    "hostname": app_hostname, "arch": app_arch, "whoami": app_whoami, "suminfo": app_suminfo,
+    "hostname": app_hostname, "arch": app_arch, "whoami": app_whoami, "tty": app_tty, "suminfo": app_suminfo,
     "test": app_test, "[": app_test, "[[": app_test,
 };
 

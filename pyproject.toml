@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sumbash"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Portable SUM shell and BusyBox-style multicall toolbox."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,7 +19,7 @@ classifiers = [
   "Topic :: System :: Shells",
   "Topic :: Utilities",
 ]
-dependencies = ["sumcore>=0.1.0a15"]
+dependencies = ["sumcore>=0.1.0a25"]
 
 [project.scripts]
 sumbash = "sumbash.cli:entry_point"
@@ -31,5 +31,5 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "../sumcore-0.1.0a15/src"]
+pythonpath = ["src", "../sumcore-0.1.0a25/src"]
 testpaths = ["tests"]
