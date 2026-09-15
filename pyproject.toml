@@ -19,7 +19,7 @@ classifiers = [
   "Topic :: System :: Shells",
   "Topic :: Utilities",
 ]
-dependencies = ["sumcore>=0.1.0a25"]
+dependencies = ["sumcore>=0.1.0a15"]
 
 [project.scripts]
 sumbash = "sumbash.cli:entry_point"
