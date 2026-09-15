@@ -101,3 +101,24 @@ def test_ls_long_human_indicators_and_help(tmp_path):
     assert "--group-directories-first" in help_result.out;
     zero=run_applet("ls",["--zero"],runtime=shell);
     assert "\0" in zero.out;
+
+
+def test_less_non_tty_renders_file_content(tmp_path):
+    p=tmp_path/"pager.txt";
+    p.write_text("alpha\nbeta\n",encoding="utf-8");
+    r=run_applet("less",[str(p)]);
+    assert r.code==0;
+    assert r.out=="alpha\nbeta\n";
+
+
+def test_less_reads_pipeline_text_when_not_tty():
+    r=run_applet("less",[],stdin="alpha\nbeta\n");
+    assert r.code==0;
+    assert r.out=="alpha\nbeta\n";
+
+
+def test_less_help():
+    r=run_applet("less",["--help"]);
+    assert r.code==0;
+    assert "search" in r.out.lower();
+    assert "PgDn" in r.out;

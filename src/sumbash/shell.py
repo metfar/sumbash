@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a6.
+"""Small portable shell core for sumbash 0.1.0a8.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -57,6 +57,10 @@ class ShellRuntime:
     def __init__(self, argv=None, env=None, cwd=None, interactive=False, argv0="sumbash"):
         self.env = dict(os.environ if env is None else env);
         self.vars = dict(self.env);
+        # SUM follows the common interactive Bash distro convention: leading-space
+        # commands are private from recall history and adjacent duplicates collapse.
+        # An explicit HISTCONTROL from the caller always wins.
+        self.vars.setdefault("HISTCONTROL","ignoreboth");
         self.exported = set(self.env);
         self.global_names = set();
         self.readonly = set();
@@ -74,6 +78,7 @@ class ShellRuntime:
         self._readline = None;
         self._history_loaded = False;
         self._history_file = None;
+        self._readline_auto_history_disabled = False;
         self.completion_specs = {};
         self._completion_engine = CompletionEngine(self);
         self._completion_cache = [];
@@ -284,10 +289,13 @@ class ShellRuntime:
         flush(); return tokens;
 
     # ---------- execution ----------
-    def run_line(self,line,capture=False,stdin=""):
+    def run_line(self,line,capture=False,stdin="",record_history=False):
         line=str(line).rstrip("\n");
         if not line.strip(): return Execution();
-        self._record_history(line);
+        # History belongs to the interactive command line, not to the execution
+        # engine.  Prompt substitutions, sourced/script lines, eval internals and
+        # command substitutions call run_line() too, but must never become history.
+        if record_history: self._record_history(line);
         try: result=self._run_raw_sequence(line,stdin=stdin);
         except ValueError as exc: return Execution(2,err="sumbash: {}\n".format(exc));
         self.last_status=result.code;
@@ -658,6 +666,12 @@ class ShellRuntime:
             # Keep path punctuation inside the current word; separators still break commands.
             readline.set_completer_delims(" \t\n;|&<>()");
             readline.set_completer(self._completion_engine.readline_completer);
+            # Python's input() normally lets readline add every accepted line to
+            # history automatically.  Disable that so sumbash alone decides which
+            # *user command lines* are history-worthy (HISTCONTROL included).
+            if hasattr(readline,"set_auto_history"):
+                readline.set_auto_history(False);
+                self._readline_auto_history_disabled=True;
         except Exception: pass;
         try:
             readline.set_history_length(self._history_file_limit());
@@ -673,10 +687,22 @@ class ShellRuntime:
         except Exception: pass;
 
     def _record_history(self,line):
-        if not self.interactive or not line.strip(): return;
+        if not self.interactive or not line.strip(): return False;
         control=self.get("HISTCONTROL");
-        if ("ignorespace" in control or "ignoreboth" in control) and line.startswith(" "): return;
-        if ("ignoredups" in control or "ignoreboth" in control) and self.history and self.history[-1]==line: return;
+
+        # On readline implementations without set_auto_history(False), input() may
+        # already have inserted the line.  Remove that provisional entry first, so
+        # ignorespace/ignoredups can still be honoured deterministically.
+        if self._readline is not None and not self._readline_auto_history_disabled:
+            try:
+                current=self._readline.get_current_history_length();
+                last=self._readline.get_history_item(current) if current else None;
+                if last==line and hasattr(self._readline,"remove_history_item"):
+                    self._readline.remove_history_item(current-1);
+            except Exception: pass;
+
+        if ("ignorespace" in control or "ignoreboth" in control) and line.startswith(" "): return False;
+        if ("ignoredups" in control or "ignoreboth" in control) and self.history and self.history[-1]==line: return False;
         self.history.append(line);
         limit=self._history_limit();
         if limit and len(self.history)>limit: self.history=self.history[-limit:];
@@ -686,6 +712,7 @@ class ShellRuntime:
                 last=self._readline.get_history_item(current) if current else None;
                 if last!=line: self._readline.add_history(line);
             except Exception: pass;
+        return True;
 
     def _write_history(self):
         if self._readline is None or not self._history_file: return;
@@ -845,7 +872,7 @@ class ShellRuntime:
             while True:
                 try:
                     line=input(self.prompt());
-                    self.run_line(line,capture=False);
+                    self.run_line(line,capture=False,record_history=True);
                 except EOFError:
                     # Ctrl-D on an empty interactive prompt is shell EOF: exit/logout.
                     sys.stdout.write("\n"); return self.last_status;

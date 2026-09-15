@@ -84,14 +84,49 @@ def test_external_interactive_command_inherits_terminal(monkeypatch,tmp_path):
 
 def test_history_recording_controls_and_builtin(tmp_path):
     shell=ShellRuntime(env={"HOME":str(tmp_path),"HISTSIZE":"3","HISTCONTROL":"ignoredups"},interactive=True);
-    shell.run_line("echo one",capture=True);
-    shell.run_line("echo one",capture=True);
-    shell.run_line("echo two",capture=True);
-    shell.run_line("echo three",capture=True);
-    shell.run_line("echo four",capture=True);
+    shell.run_line("echo one",capture=True,record_history=True);
+    shell.run_line("echo one",capture=True,record_history=True);
+    shell.run_line("echo two",capture=True,record_history=True);
+    shell.run_line("echo three",capture=True,record_history=True);
+    shell.run_line("echo four",capture=True,record_history=True);
     assert shell.history==["echo two","echo three","echo four"];
-    shown=shell.run_line("history 2",capture=True).out;
+    shown=shell.run_line("history 2",capture=True,record_history=True).out;
     assert "echo four" in shown and "history 2" in shown;
+
+
+def test_history_records_only_top_level_commandline(tmp_path):
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"HISTCONTROL":"ignoreboth"},interactive=True);
+    shell.set_var("PS1","$(echo prompt-helper) > ");
+    # Prompt command substitution executes, but is infrastructure, not a typed command.
+    shell.prompt();
+    assert shell.history==[];
+    shell.run_line("echo typed",capture=True,record_history=True);
+    # Nested command substitutions also execute without becoming separate entries.
+    shell.run_line("echo $(echo nested)",capture=True,record_history=True);
+    assert shell.history==["echo typed","echo $(echo nested)"];
+
+
+def test_history_ignores_leading_space_with_ignoreboth(tmp_path):
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"HISTCONTROL":"ignoreboth"},interactive=True);
+    shell.run_line("echo visible",capture=True,record_history=True);
+    shell.run_line(" secret-command",capture=True,record_history=True);
+    assert shell.history==["echo visible"];
+
+
+def test_history_default_hides_leading_space(tmp_path):
+    shell=ShellRuntime(env={"HOME":str(tmp_path)},interactive=True);
+    shell.run_line("echo visible",capture=True,record_history=True);
+    shell.run_line(" hidden-command",capture=True,record_history=True);
+    assert shell.get("HISTCONTROL")=="ignoreboth";
+    assert shell.history==["echo visible"];
+
+
+def test_script_lines_are_not_history(tmp_path):
+    script=tmp_path/"sample.sh";
+    script.write_text("echo from-script\necho again\n",encoding="utf-8");
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"HISTCONTROL":"ignoreboth"},cwd=tmp_path,interactive=True);
+    shell.run_line("source sample.sh",capture=True,record_history=True);
+    assert shell.history==["source sample.sh"];
 
 
 def test_cat_reads_interactive_stdin_until_eof(monkeypatch,tmp_path):

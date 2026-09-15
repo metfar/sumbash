@@ -935,6 +935,215 @@ def app_tty(argv, stdin="", runtime=None):
     return AppletResult(out=name+"\n");
 
 
+
+def _less_help_text():
+    return """sumbash less - portable interactive pager
+
+Usage: less [OPTION]... [FILE]...
+
+Keys:
+  q              quit
+  j, Down, Enter scroll down one line
+  k, Up           scroll up one line
+  Space, PgDn, f  next page
+  b, PgUp         previous page
+  d / u           half page down / up
+  g / G           first / last page
+  /PATTERN         search forward (regular expression)
+  ?PATTERN         search backward
+  n / N            repeat search forward / backward
+  Left / Right     horizontal scroll with -S
+  Ctrl-L           redraw
+  h                show this help
+
+Options:
+  -N              show line numbers
+  -S              chop long lines instead of wrapping
+  -i              case-insensitive searches
+  -X              do not use the terminal alternate screen
+  --help          show this help
+""";
+
+
+def _less_read_sources(argv, stdin, runtime):
+    args=list(argv); line_numbers=False; chop=False; ignore_case=False; alt_screen=True; start_end=False; initial_search=None; files=[]; i=0;
+    while i<len(args):
+        arg=args[i];
+        if arg=="--": files.extend(args[i+1:]); break;
+        if arg in ("--help","-h"): return None, None, _less_help_text(), 0;
+        if arg=="-N": line_numbers=True; i+=1; continue;
+        if arg=="-S": chop=True; i+=1; continue;
+        if arg=="-i": ignore_case=True; i+=1; continue;
+        if arg=="-X": alt_screen=False; i+=1; continue;
+        if arg=="+G": start_end=True; i+=1; continue;
+        if arg.startswith("+/"):
+            initial_search=arg[2:]; i+=1; continue;
+        if arg.startswith("-") and arg!="-":
+            return None, None, "less: unsupported option: {}\n".format(arg), 2;
+        files.append(arg); i+=1;
+    base=Path(getattr(runtime,"cwd",os.getcwd())); chunks=[]; labels=[];
+    if files:
+        for name in files:
+            if name=="-": chunks.append(_text_input(stdin)); labels.append("standard input"); continue;
+            path=Path(name); path=path if path.is_absolute() else base/path;
+            try: chunks.append(path.read_text(encoding="utf-8",errors="replace")); labels.append(str(name));
+            except OSError as exc: return None, None, "less: {}: {}\n".format(name,exc), 1;
+    elif stdin not in (None,""):
+        chunks.append(_text_input(stdin)); labels.append("standard input");
+    else:
+        return None, None, "less: missing filename or input\n", 1;
+    if len(chunks)==1: text=chunks[0]; label=labels[0];
+    else:
+        joined=[];
+        for label0,chunk in zip(labels,chunks): joined.append("::::::::::::::\n{}\n::::::::::::::\n{}".format(label0,chunk));
+        text="\n".join(joined); label="{} files".format(len(chunks));
+    options={"line_numbers":line_numbers,"chop":chop,"ignore_case":ignore_case,"alt_screen":alt_screen,"start_end":start_end,"initial_search":initial_search,"label":label};
+    return text, options, "", 0;
+
+
+def _less_key_reader(control_fd=None):
+    if os.name=="nt":
+        import msvcrt;
+        ch=msvcrt.getwch();
+        if ch in ("\x00","\xe0"):
+            code=msvcrt.getwch();
+            return {"H":"UP","P":"DOWN","I":"PGUP","Q":"PGDN","K":"LEFT","M":"RIGHT","G":"HOME","O":"END"}.get(code,code);
+        return ch;
+    import termios;
+    fd=sys.stdin.fileno() if control_fd is None else control_fd; old=termios.tcgetattr(fd);
+    try:
+        new=termios.tcgetattr(fd); new[3] &= ~(termios.ICANON|termios.ECHO); new[6][termios.VMIN]=1; new[6][termios.VTIME]=0; termios.tcsetattr(fd,termios.TCSADRAIN,new);
+        first=os.read(fd,1);
+        if first!=b"\x1b": return first.decode("utf-8",errors="ignore");
+        import select; seq=bytearray(first);
+        while len(seq)<8:
+            ready,_,_=select.select([fd],[],[],0.015);
+            if not ready: break;
+            seq.extend(os.read(fd,1));
+            if seq[-1:] in (b"A",b"B",b"C",b"D",b"H",b"F",b"~"): break;
+        code=bytes(seq);
+        return {b"\x1b[A":"UP",b"\x1b[B":"DOWN",b"\x1b[C":"RIGHT",b"\x1b[D":"LEFT",b"\x1b[5~":"PGUP",b"\x1b[6~":"PGDN",b"\x1b[H":"HOME",b"\x1b[F":"END"}.get(code,"ESC");
+    finally:
+        termios.tcsetattr(fd,termios.TCSADRAIN,old);
+
+
+def _less_prompt_input(prefix,control_fd=None):
+    buf=[]; sys.stdout.write("\x1b[7m{}\x1b[0m".format(prefix)); sys.stdout.flush();
+    while True:
+        key=_less_key_reader(control_fd);
+        if key in ("\r","\n"): return "".join(buf);
+        if key in ("ESC","\x03"): return None;
+        if key in ("\x7f","\b"):
+            if buf: buf.pop(); sys.stdout.write("\b \b"); sys.stdout.flush();
+            continue;
+        if isinstance(key,str) and len(key)==1 and key.isprintable(): buf.append(key); sys.stdout.write(key); sys.stdout.flush();
+
+
+def _less_visual_rows(lines,width,line_numbers=False,chop=False,h_offset=0):
+    rows=[]; prefix_width=(len(str(max(1,len(lines))))+1) if line_numbers else 0; body_width=max(1,width-prefix_width);
+    for idx,line in enumerate(lines):
+        line=line.expandtabs(8); prefix=(str(idx+1).rjust(prefix_width-1)+" ") if line_numbers else "";
+        if chop:
+            rows.append((idx,prefix+line[h_offset:h_offset+body_width])); continue;
+        if not line: rows.append((idx,prefix)); continue;
+        start=0; first=True;
+        while start<len(line):
+            part=line[start:start+body_width]; rows.append((idx,(prefix if first else " "*prefix_width)+part)); first=False; start+=body_width;
+    return rows or [(0,"")];
+
+
+def _less_search(lines,pattern,start_line,direction,ignore_case):
+    flags=re.I if ignore_case else 0;
+    try: rx=re.compile(pattern,flags);
+    except re.error: rx=re.compile(re.escape(pattern),flags);
+    if direction>=0:
+        indexes=range(min(len(lines),start_line+1),len(lines));
+    else:
+        indexes=range(min(len(lines)-1,start_line-1),-1,-1);
+    for idx in indexes:
+        if rx.search(lines[idx]): return idx;
+    return None;
+
+
+def _less_interactive(text,options):
+    if not getattr(sys.stdout,"isatty",lambda:False)(): return False;
+    control_fd=None; close_control=False;
+    if os.name!="nt":
+        if getattr(sys.stdin,"isatty",lambda:False)(): control_fd=sys.stdin.fileno();
+        else:
+            try: control_fd=os.open("/dev/tty",os.O_RDWR); close_control=True;
+            except OSError: return False;
+    lines=text.splitlines();
+    if not lines: lines=[""];
+    top=0; h_offset=0; last_search=None; search_direction=1; message=""; alt=options["alt_screen"];
+    if alt: sys.stdout.write("\x1b[?1049h"); sys.stdout.flush();
+    try:
+        while True:
+            size=shutil.get_terminal_size((80,24)); height=max(1,size.lines-1); width=max(10,size.columns);
+            rows=_less_visual_rows(lines,width,options["line_numbers"],options["chop"],h_offset);
+            if options["start_end"]:
+                top=max(0,len(rows)-height); options["start_end"]=False;
+            if options["initial_search"] is not None:
+                pat=options["initial_search"]; options["initial_search"]=None;
+                hit=_less_search(lines,pat,-1,1,options["ignore_case"]); last_search=pat; search_direction=1;
+                if hit is not None:
+                    for pos,(src,_) in enumerate(rows):
+                        if src==hit: top=pos; break;
+            top=max(0,min(top,max(0,len(rows)-height)));
+            visible=rows[top:top+height];
+            sys.stdout.write("\x1b[H\x1b[2J");
+            for _,row in visible:
+                sys.stdout.write(row[:width]+"\x1b[K\n");
+            if len(visible)<height:
+                for _ in range(height-len(visible)): sys.stdout.write("~\x1b[K\n");
+            first_line=rows[top][0]+1; last_line=visible[-1][0]+1 if visible else first_line; percent=min(100,int((top+height)*100/max(1,len(rows))));
+            status=message or "{}  lines {}-{} / {}  {}%  (q to quit, / to search)".format(options["label"],first_line,last_line,len(lines),percent); message="";
+            sys.stdout.write("\x1b[7m"+status[:width].ljust(width)+"\x1b[0m"); sys.stdout.flush();
+            key=_less_key_reader(control_fd);
+            if key in ("q","Q","\x03"): break;
+            if key in ("DOWN","j","\r","\n"): top+=1; continue;
+            if key in ("UP","k"): top-=1; continue;
+            if key in ("PGDN"," ","f"): top+=height; continue;
+            if key in ("PGUP","b"): top-=height; continue;
+            if key=="d": top+=max(1,height//2); continue;
+            if key=="u": top-=max(1,height//2); continue;
+            if key in ("g","HOME"): top=0; continue;
+            if key in ("G","END"): top=max(0,len(rows)-height); continue;
+            if key=="LEFT" and options["chop"]: h_offset=max(0,h_offset-max(1,width//4)); continue;
+            if key=="RIGHT" and options["chop"]: h_offset+=max(1,width//4); continue;
+            if key in ("/","?"):
+                sys.stdout.write("\r\x1b[K"); sys.stdout.flush(); pat=_less_prompt_input(key,control_fd);
+                if pat is None: continue;
+                last_search=pat; search_direction=1 if key=="/" else -1; current=rows[top][0]; hit=_less_search(lines,pat,current-search_direction,search_direction,options["ignore_case"]);
+                if hit is None: message="Pattern not found: {}".format(pat); continue;
+                for pos,(src,_) in enumerate(rows):
+                    if src==hit: top=pos; break;
+                continue;
+            if key in ("n","N") and last_search:
+                direction=search_direction if key=="n" else -search_direction; current=rows[top][0]; hit=_less_search(lines,last_search,current,direction,options["ignore_case"]);
+                if hit is None: message="Pattern not found: {}".format(last_search); continue;
+                positions=[pos for pos,(src,_) in enumerate(rows) if src==hit];
+                if positions: top=positions[0];
+                continue;
+            if key=="h":
+                message="q quit | arrows/jk line | PgUp/PgDn/space page | g/G ends | / ? search | n/N repeat"; continue;
+            if key=="\x0c": continue;
+        return True;
+    finally:
+        if alt: sys.stdout.write("\x1b[?1049l");
+        else: sys.stdout.write("\n");
+        sys.stdout.flush();
+        if close_control and control_fd is not None:
+            try: os.close(control_fd);
+            except OSError: pass;
+
+
+def app_less(argv, stdin="", runtime=None):
+    text,options,message,code=_less_read_sources(argv,stdin,runtime);
+    if text is None: return AppletResult(code,out=message if code==0 else "",err=message if code else "");
+    if _less_interactive(text,options): return AppletResult();
+    return AppletResult(out=text if text.endswith("\n") or not text else text+"\n");
+
 def app_suminfo(argv, stdin="", runtime=None):
     # Capture suminfo's pure renderer instead of spawning another process.
     if "--short" in argv: return AppletResult(out=suminfo.render_identity_short(suminfo.collect_identity())+"\n");
@@ -978,7 +1187,7 @@ APPLETS = {
     "egrep": app_grep, "fgrep": app_grep, "cut": app_cut, "sed": app_sed, "head": app_head,
     "tail": app_tail, "sort": app_sort, "uniq": app_uniq, "wc": app_wc, "tee": app_tee,
     "date": app_date, "uptime": app_uptime, "uname": app_uname, "lsb_release": app_lsb_release,
-    "hostname": app_hostname, "arch": app_arch, "whoami": app_whoami, "tty": app_tty, "suminfo": app_suminfo,
+    "hostname": app_hostname, "arch": app_arch, "whoami": app_whoami, "tty": app_tty, "less": app_less, "suminfo": app_suminfo,
     "test": app_test, "[": app_test, "[[": app_test,
 };
 

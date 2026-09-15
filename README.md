@@ -2,7 +2,7 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.1.0a6` is the current concrete vertical alpha.
+Version `0.1.0a8` is the current concrete vertical alpha.
 
 ## Invocation
 
@@ -55,7 +55,11 @@ pow(x, y)
 
 `int()` truncates toward zero. `round()` rounds half values away from zero. Bitwise operators require integer operands instead of silently truncating fractional values.
 
-## Shell features in 0.1.0a6
+## History semantics in 0.1.0a8
+
+History records only command lines accepted at the interactive prompt. Commands executed while expanding `PS1`, command substitutions, sourced files, script files and nested `eval` execution are not separate history entries. `HISTCONTROL=ignorespace` and `HISTCONTROL=ignoreboth` suppress a user command line whose first character is a space; `ignoredups`/`ignoreboth` suppress adjacent duplicates. SUM defaults `HISTCONTROL` to `ignoreboth` when the parent environment does not provide it, matching the common Ubuntu interactive-shell convention. Python readline auto-history is disabled when the binding supports it so the shell remains the single owner of history policy.
+
+## Shell features in 0.1.0a8
 
 The first alpha implements a useful subset rather than pretending to be complete Bash:
 
@@ -78,13 +82,13 @@ The first alpha implements a useful subset rather than pretending to be complete
 
 The next language alphas are intended to add compound grammar (`if`, `case`, `for`, `while`), functions/local scope, indexed/associative arrays and fuller Bash/ksh compatibility.
 
-## Portable applets in 0.1.0a6
+## Portable applets in 0.1.0a8
 
 The package currently ships these internal applets:
 
 ```text
 arch basename cat clear cut date dirname echo egrep fgrep find grep
-head hostname ls lsb_release printf pwd realpath rev sed sleep sort
+head hostname less ls lsb_release printf pwd realpath rev sed sleep sort
 suminfo tail tee test tty uname uniq uptime wc whoami [ [[
 ```
 
@@ -99,6 +103,21 @@ ls --color=never
 Automatic color is suppressed in pipelines and file redirections; `--color=always` deliberately forces ANSI sequences through them. Since a4, the portable `ls` surface is substantially expanded: column/row/single/comma/NUL formats, long listings, owner/group and numeric IDs, hidden-file controls, recursive traversal, human/SI sizes, inode and allocated-block display, time-field/time-style selection, name/time/size/version/extension sorting, reverse order, directory grouping, symlink dereferencing controls, indicators, quoting styles, control-character handling, OSC-8 hyperlinks, ignore/hide patterns, and best-effort security-context display. `--dired` is accepted for compatibility, but GNU/Emacs byte-offset metadata is not emitted yet.
 
 `sed` is intentionally limited in this first alpha to the common substitution form `s///[g]` plus `p`. Full `awk`, full `sed`, job control and process substitution are not claimed yet. When a name is not a SUM builtin/applet, `sumbash` looks for an executable in the host `PATH`.
+
+
+## Interactive pager (`less`)
+
+`sumbash` now includes a portable `less` applet. When its output is a terminal it
+enters an interactive full-screen pager; when stdout is redirected/piped it behaves
+as a stream filter and emits the input unchanged. The first pager surface supports
+Up/Down or `j`/`k`, PgUp/PgDn, Space, `b`, half-page `d`/`u`, `g`/`G`, forward
+and backward regular-expression search with `/` and `?`, repeat search with `n`/`N`,
+`Ctrl-L` redraw, and `q` to quit. `-N`, `-S`, `-i`, `-X`, `+G` and `+/PATTERN`
+are supported. With `-S`, Left/Right scroll horizontally.
+
+The pager is implemented inside SUM rather than requiring the host `less`, keeping
+the same useful surface available on Windows and Android terminals. A later release
+can move this pager engine behind `sumdoc`/`sumTerm` without changing the command.
 
 ## Terminal scrollback
 
@@ -132,7 +151,7 @@ pwd -P
 Historical private scripts were used only to identify shell constructs and practical requirements; they are not incorporated as examples or test fixtures.
 
 
-## Interactive completion (0.1.0a6)
+## Interactive completion (0.1.0a8)
 
 When Python is linked with GNU readline, `TAB` completes commands from aliases,
 builtins, SUM applets and `PATH`, and completes filesystem names for arguments.

@@ -50,7 +50,7 @@ def _show_help(file=sys.stdout):
     print("  --remove-links DIR              remove links/copies installed by sumbash",file=file);
     print("  --version                       show version",file=file);
     print("",file=file);
-    print("0.1.0a6 is a vertical alpha: compound Bash grammar (if/for/while/functions/arrays)",file=file);
+    print("0.1.0a8 is a vertical alpha: compound Bash grammar (if/for/while/functions/arrays)",file=file);
     print("is not implemented yet. Variables, expansions, command substitution, fractional",file=file);
     print("arithmetic, pipelines, redirections, aliases, selected builtins and external",file=file);
     print("PATH fallback are implemented.",file=file);
@@ -105,7 +105,7 @@ def remove_links(directory,argv0):
 
 def _run_direct_applet(name,args):
     runtime=ShellRuntime(argv0=name);
-    stream_applets={"cat","rev","grep","egrep","fgrep","cut","sed","head","tail","sort","uniq","wc","tee"};
+    stream_applets={"cat","rev","grep","egrep","fgrep","cut","sed","head","tail","sort","uniq","wc","tee","less"};
     stdin=sys.stdin.read() if name in stream_applets and not sys.stdin.isatty() else "";
     result=run_applet(name,args,stdin=stdin,runtime=runtime);
     if result is None: return 127;
