@@ -2,7 +2,7 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.1.0a2` is the first concrete vertical alpha.
+Version `0.1.0a3` is the current concrete vertical alpha.
 
 ## Invocation
 
@@ -55,7 +55,7 @@ pow(x, y)
 
 `int()` truncates toward zero. `round()` rounds half values away from zero. Bitwise operators require integer operands instead of silently truncating fractional values.
 
-## Shell features in 0.1.0a2
+## Shell features in 0.1.0a3
 
 The first alpha implements a useful subset rather than pretending to be complete Bash:
 
@@ -75,7 +75,7 @@ The first alpha implements a useful subset rather than pretending to be complete
 
 The next language alphas are intended to add compound grammar (`if`, `case`, `for`, `while`), functions/local scope, indexed/associative arrays and fuller Bash/ksh compatibility.
 
-## Portable applets in 0.1.0a2
+## Portable applets in 0.1.0a3
 
 The package currently ships these internal applets:
 
@@ -84,6 +84,16 @@ arch basename cat clear cut date dirname echo egrep fgrep find grep
 head hostname ls lsb_release printf pwd realpath rev sed sleep sort
 suminfo tail tee test uname uniq uptime wc whoami [ [[
 ```
+
+`ls` reads the standard `LS_COLORS` format. In SUM, an exported `LS_COLORS` enables color automatically when the command output is a terminal. The usual controls are also accepted explicitly:
+
+```text
+ls --color=auto
+ls --color=always
+ls --color=never
+```
+
+Automatic color is suppressed in pipelines and file redirections; `--color=always` deliberately forces ANSI sequences through them.
 
 `sed` is intentionally limited in this first alpha to the common substitution form `s///[g]` plus `p`. Full `awk`, full `sed`, job control and process substitution are not claimed yet. When a name is not a SUM builtin/applet, `sumbash` looks for an executable in the host `PATH`.
 

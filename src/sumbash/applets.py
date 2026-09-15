@@ -143,16 +143,75 @@ def _human_size(value):
         n/=1024;
 
 
+def _parse_ls_colors(value):
+    result={};
+    for entry in str(value or "").split(":"):
+        if "=" not in entry: continue;
+        key,code=entry.split("=",1);
+        if key: result[key]=code;
+    return result;
+
+
+def _ls_color_key(path, colors):
+    try:
+        if path.is_symlink():
+            try:
+                if not path.exists() and "or" in colors: return "or";
+            except OSError: pass;
+            return "ln";
+        if path.is_dir(): return "di";
+        if path.is_fifo(): return "pi";
+        if path.is_socket(): return "so";
+        if path.is_block_device(): return "bd";
+        if path.is_char_device(): return "cd";
+        if path.is_file():
+            if os.access(path,os.X_OK) and "ex" in colors: return "ex";
+            name=path.name;
+            for key in colors:
+                if key.startswith("*") and fnmatch.fnmatchcase(name,key): return key;
+            return "fi" if "fi" in colors else "rs";
+    except OSError:
+        return "mi" if "mi" in colors else "rs";
+    return "rs";
+
+
+def _ls_colored_name(path, name, colors, enabled):
+    if not enabled or not colors: return name;
+    key=_ls_color_key(path,colors); code=colors.get(key,"");
+    if not code or code=="0" or code=="00": return name;
+    return "\x1b[{}m{}\x1b[0m".format(code,name);
+
+
 def app_ls(argv, stdin="", runtime=None):
-    show_all=False; long=False; human=False; classify=False; paths=[];
-    for arg in argv:
-        if arg.startswith("-") and arg != "-":
-            show_all = show_all or "a" in arg;
-            long = long or "l" in arg;
-            human = human or "h" in arg;
-            classify = classify or "F" in arg;
-        else: paths.append(arg);
+    show_all=False; long=False; human=False; classify=False; paths=[]; color_mode=None;
+    i=0; args=list(argv);
+    while i<len(args):
+        arg=args[i];
+        if arg=="--": paths.extend(args[i+1:]); break;
+        if arg=="--color": color_mode="always"; i+=1; continue;
+        if arg.startswith("--color="):
+            color_mode=arg.split("=",1)[1].lower();
+            if color_mode not in ("always","auto","never"): return AppletResult(2,err="ls: invalid argument '{}' for --color\n".format(color_mode));
+            i+=1; continue;
+        if arg in ("--all",): show_all=True; i+=1; continue;
+        if arg.startswith("-") and arg != "-" and not arg.startswith("--"):
+            flags=arg[1:];
+            show_all = show_all or "a" in flags;
+            long = long or "l" in flags;
+            human = human or "h" in flags;
+            classify = classify or "F" in flags;
+            i+=1; continue;
+        paths.append(arg); i+=1;
     if not paths: paths=["."];
+    env=(runtime.vars if runtime is not None else os.environ); ls_colors=env.get("LS_COLORS",""); colors=_parse_ls_colors(ls_colors);
+    # SUM convenience: an exported LS_COLORS enables color automatically.
+    # --color=never always disables it, and --color=always forces it through pipes.
+    if color_mode is None: color_mode="auto" if ls_colors else "never";
+    output_tty=getattr(runtime,"_command_stdout_is_tty",None) if runtime is not None else None;
+    if output_tty is None:
+        try: output_tty=sys.stdout.isatty();
+        except Exception: output_tty=False;
+    use_color=(color_mode=="always" or (color_mode=="auto" and bool(output_tty)));
     out=[]; err=[]; code=0;
     for pindex, raw in enumerate(paths):
         base=Path(runtime.cwd if runtime is not None else os.getcwd()); p=Path(raw); p=p if p.is_absolute() else base/p;
@@ -162,11 +221,12 @@ def app_ls(argv, stdin="", runtime=None):
         if len(paths)>1: out.append("{}:\n".format(raw));
         for item in items:
             if item.name.startswith(".") and not show_all and item != p: continue;
-            name=item.name if item != p else raw;
+            raw_name=item.name if item != p else raw; suffix="";
             if classify:
-                if item.is_dir(): name += "/";
-                elif os.access(item, os.X_OK): name += "*";
-                elif item.is_symlink(): name += "@";
+                if item.is_dir(): suffix="/";
+                elif item.is_symlink(): suffix="@";
+                elif os.access(item, os.X_OK): suffix="*";
+            name=_ls_colored_name(item,raw_name,colors,use_color)+suffix;
             if long:
                 try:
                     st=item.lstat(); mode="d" if item.is_dir() else ("l" if item.is_symlink() else "-");

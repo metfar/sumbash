@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a1.
+"""Small portable shell core for sumbash 0.1.0a3.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -70,6 +70,9 @@ class ShellRuntime:
         self.history = [];
         self.pid = os.getpid();
         self._source_depth = 0;
+        try: self._stdout_is_tty = bool(sys.stdout.isatty());
+        except Exception: self._stdout_is_tty = False;
+        self._command_stdout_is_tty = self._stdout_is_tty;
 
     def get(self, name, default=""):
         if name == "?": return str(self.last_status);
@@ -155,7 +158,10 @@ class ShellRuntime:
                     if text[j]=="`" and not escaped: break;
                     escaped=(text[j]=="\\" and not escaped); j+=1;
                 if j>=len(text): out.append(ch); i+=1; continue;
-                result=self.run_line(text[i+1:j],capture=True); out.append(result.out.rstrip("\n")); i=j+1; continue;
+                old_tty=self._stdout_is_tty; self._stdout_is_tty=False;
+                try: result=self.run_line(text[i+1:j],capture=True);
+                finally: self._stdout_is_tty=old_tty;
+                out.append(result.out.rstrip("\n")); i=j+1; continue;
             if ch!="$": out.append(ch); i+=1; continue;
             if text.startswith("$((",i):
                 end=self._balanced_arithmetic(text,i+3);
@@ -167,7 +173,10 @@ class ShellRuntime:
             if text.startswith("$(",i):
                 end=self._balanced_paren(text,i+2);
                 if end is None: out.append("$"); i+=1; continue;
-                result=self.run_line(text[i+2:end],capture=True); out.append(result.out.rstrip("\n")); i=end+1; continue;
+                old_tty=self._stdout_is_tty; self._stdout_is_tty=False;
+                try: result=self.run_line(text[i+2:end],capture=True);
+                finally: self._stdout_is_tty=old_tty;
+                out.append(result.out.rstrip("\n")); i=end+1; continue;
             if i+1<len(text) and text[i+1]=="{":
                 end=text.find("}",i+2);
                 if end<0: out.append("$"); i+=1; continue;
@@ -325,9 +334,9 @@ class ShellRuntime:
 
     def _run_raw_pipeline(self,line,stdin=""):
         pieces,unused=self._split_raw(line,("|",)); data=stdin; err=[]; code=0;
-        for piece in pieces:
+        for index,piece in enumerate(pieces):
             tokens=self.tokenize(piece);
-            result=self._run_command(tokens,stdin=data); data=result.out; code=result.code;
+            result=self._run_command(tokens,stdin=data,stdout_is_tty=(self._stdout_is_tty and index==len(pieces)-1)); data=result.out; code=result.code;
             if result.err: err.append(result.err);
         return Execution(code,data,"".join(err));
 
@@ -365,12 +374,12 @@ class ShellRuntime:
             else: cur.append(tok);
         commands.append(cur);
         data=stdin; stderr=[]; code=0;
-        for command in commands:
-            result=self._run_command(command,stdin=data); data=result.out; code=result.code;
+        for index,command in enumerate(commands):
+            result=self._run_command(command,stdin=data,stdout_is_tty=(self._stdout_is_tty and index==len(commands)-1)); data=result.out; code=result.code;
             if result.err: stderr.append(result.err);
         return Execution(code,data,"".join(stderr));
 
-    def _run_command(self,tokens,stdin=""):
+    def _run_command(self,tokens,stdin="",stdout_is_tty=None):
         if not tokens: return Execution();
         # redirects
         args=[]; in_data=stdin; out_file=None; append=False; err_file=None; err_append=False; merge_err=False; i=0;
@@ -407,8 +416,11 @@ class ShellRuntime:
             if alias_tokens: name=alias_tokens[0]; args=alias_tokens[1:]+args;
         saved={};
         for key,value in assignments.items(): saved[key]=self.vars.get(key,None); self.vars[key]=value;
+        old_command_tty=self._command_stdout_is_tty;
+        self._command_stdout_is_tty=bool(self._stdout_is_tty if stdout_is_tty is None else stdout_is_tty) and out_file is None;
         try: result=self._dispatch(name,args,in_data,assignments);
         finally:
+            self._command_stdout_is_tty=old_command_tty;
             for key,old in saved.items():
                 if old is None: self.vars.pop(key,None);
                 else: self.vars[key]=old;

@@ -40,3 +40,30 @@ def test_tty_applet_reports_terminal(monkeypatch):
     result=app_tty([]);
     assert result.code==0;
     assert result.out=="/dev/pts/9\n";
+
+
+def test_ls_uses_ls_colors_on_terminal(tmp_path):
+    (tmp_path/"adir").mkdir();
+    (tmp_path/"note.py").write_text("print('x')\n",encoding="utf-8");
+    shell=ShellRuntime(env={"LS_COLORS":"di=01;34:*.py=01;35:rs=0"},cwd=tmp_path);
+    shell._command_stdout_is_tty=True;
+    result=run_applet("ls",[],runtime=shell);
+    assert result.code==0;
+    assert "\x1b[01;34madir\x1b[0m" in result.out;
+    assert "\x1b[01;35mnote.py\x1b[0m" in result.out;
+
+
+def test_ls_color_modes_and_pipeline_safety(tmp_path):
+    (tmp_path/"adir").mkdir();
+    env={"LS_COLORS":"di=01;34:rs=0"};
+    shell=ShellRuntime(env=env,cwd=tmp_path);
+    shell._command_stdout_is_tty=False;
+    auto=run_applet("ls",[],runtime=shell);
+    assert "\x1b[" not in auto.out;
+    forced=run_applet("ls",["--color=always"],runtime=shell);
+    assert "\x1b[01;34m" in forced.out;
+    never=run_applet("ls",["--color=never"],runtime=shell);
+    assert "\x1b[" not in never.out;
+    shell._stdout_is_tty=True;
+    piped=shell.run_line("ls | cat",capture=True);
+    assert "\x1b[" not in piped.out;
