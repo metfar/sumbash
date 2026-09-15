@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: sumbash
-Version: 0.1.0a5
+Version: 0.1.0a6
 Summary: Portable SUM shell and BusyBox-style multicall toolbox.
 Author-email: William Martinez Bas <metfar@gmail.com>
 License-Expression: GPL-2.0-or-later
@@ -20,7 +20,7 @@ Dynamic: license-file
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.1.0a5` is the current concrete vertical alpha.
+Version `0.1.0a6` is the current concrete vertical alpha.
 
 ## Invocation
 
@@ -73,7 +73,7 @@ pow(x, y)
 
 `int()` truncates toward zero. `round()` rounds half values away from zero. Bitwise operators require integer operands instead of silently truncating fractional values.
 
-## Shell features in 0.1.0a5
+## Shell features in 0.1.0a6
 
 The first alpha implements a useful subset rather than pretending to be complete Bash:
 
@@ -84,7 +84,7 @@ The first alpha implements a useful subset rather than pretending to be complete
 - `$((...))` fractional arithmetic;
 - `;`, `&&`, `||` and internal pipelines;
 - `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`;
-- `cd`, `export`, SUM `global`, `unset`, `readonly`, `alias`, `unalias`, `source`/`.`, `eval`, `command`, `type`, `history`, `read`, `inkey`, `true`, `false`, `exit` and `let`;
+- `cd`, `export`, SUM `global`, `unset`, `readonly`, `alias`, `unalias`, `source`/`.`, `eval`, `command`, `type`, `history`, `complete`, `compgen`, `compopt`, `read`, `inkey`, `true`, `false`, `exit` and `let`;
 - `command -v`, `command -V`, `type` and `type -a` use the same command resolver as execution;
 - `shopt -s cdspell`, `histappend`, `checkwinsize` and `globstar` state; `cdspell` is active in this alpha;
 - `set -o vi` selects vi editing mode when Python readline provides it;
@@ -96,14 +96,14 @@ The first alpha implements a useful subset rather than pretending to be complete
 
 The next language alphas are intended to add compound grammar (`if`, `case`, `for`, `while`), functions/local scope, indexed/associative arrays and fuller Bash/ksh compatibility.
 
-## Portable applets in 0.1.0a5
+## Portable applets in 0.1.0a6
 
 The package currently ships these internal applets:
 
 ```text
 arch basename cat clear cut date dirname echo egrep fgrep find grep
 head hostname ls lsb_release printf pwd realpath rev sed sleep sort
-suminfo tail tee test uname uniq uptime wc whoami [ [[
+suminfo tail tee test tty uname uniq uptime wc whoami [ [[
 ```
 
 `ls` reads the standard `LS_COLORS` format. In SUM, an exported `LS_COLORS` enables color automatically when the command output is a terminal. The usual controls are also accepted explicitly:
@@ -148,5 +148,20 @@ pwd -P
 `sumbash` is a portable toolbox, not a replacement operating system. Host-specific administration such as user management, hardening, package managers, service managers and specialised programs such as OpenSSL, Git or FFmpeg remain host/external commands.
 
 Historical private scripts were used only to identify shell constructs and practical requirements; they are not incorporated as examples or test fixtures.
+
+
+## Interactive completion (0.1.0a6)
+
+When Python is linked with GNU readline, `TAB` completes commands from aliases,
+builtins, SUM applets and `PATH`, and completes filesystem names for arguments.
+Directories receive a trailing slash; `cd` filters to directories; `$NAME` and
+`${NAME}` complete shell variables.  Readline keeps the traditional ambiguous
+completion behaviour: the first TAB attempts completion/common-prefix expansion
+and a repeated TAB displays the alternatives.
+
+A first portable subset of Bash programmable completion is also present:
+`complete` supports `-A`, `-W`, `-f`, `-d`, `-c`, `-o`, `-P`, `-S`, `-X`, `-p`
+and `-r`; `compgen` uses the same generators.  `compopt` is present as a probe
+but function-scoped completion options wait for shell-function support.
 
 <p align=center><b>- oOo -</b></p>

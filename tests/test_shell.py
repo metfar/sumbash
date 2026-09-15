@@ -122,3 +122,51 @@ def test_interactive_ctrl_d_exits(monkeypatch,tmp_path):
         raise EOFError;
     monkeypatch.setattr("builtins.input",eof);
     assert shell.interactive_loop()==0;
+
+
+def test_native_completion_commands_paths_variables_and_cd(tmp_path, monkeypatch):
+    from sumbash.completion import CompletionEngine;
+    bindir=tmp_path/"bin"; bindir.mkdir();
+    tool=bindir/"sumtool"; tool.write_text("#!/bin/sh\n",encoding="utf-8"); tool.chmod(0o755);
+    (tmp_path/"sendbash.sh").write_text("x",encoding="utf-8");
+    (tmp_path/"sumbash").mkdir(); (tmp_path/"sumbash-0.1.0a6").mkdir();
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"PATH":str(bindir),"HOSTNAME":"x1b5ca"},cwd=tmp_path,interactive=True);
+    engine=CompletionEngine(shell);
+    assert "sumtool" in engine.candidates("sumt");
+    assert engine.candidates("ls sen")==["sendbash.sh"];
+    assert set(engine.candidates("ls s"))=={"sendbash.sh","sumbash/","sumbash-0.1.0a6/"};
+    assert set(engine.candidates("cd sumbash"))=={"sumbash/","sumbash-0.1.0a6/"};
+    assert engine.candidates("echo $HO")==["$HOME","$HOSTNAME"];
+
+
+def test_completion_quotes_spaces_and_hidden_files(tmp_path):
+    from sumbash.completion import CompletionEngine;
+    (tmp_path/"my file.txt").write_text("x",encoding="utf-8");
+    (tmp_path/".hidden").write_text("x",encoding="utf-8");
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"PATH":""},cwd=tmp_path);
+    engine=CompletionEngine(shell);
+    assert engine.candidates("cat my")==['my\\ file.txt'];
+    spaced=tmp_path/"my folder"; spaced.mkdir(); (spaced/"inside.txt").write_text("x",encoding="utf-8");
+    assert engine.candidates(r"cat my\ folder/in")==[r"my\ folder/inside.txt"];
+    assert engine.candidates("cat .h")==[".hidden"];
+    assert ".hidden" not in engine.candidates("cat ");
+
+
+def test_complete_and_compgen_builtins(tmp_path):
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"PATH":""},cwd=tmp_path);
+    result=shell.run_line("complete -W 'start stop status' svc",capture=True);
+    assert result.code==0;
+    assert shell._completion_engine.candidates("svc st")==["start","status","stop"];
+    printed=shell.run_line("complete -p svc",capture=True);
+    assert "complete -W 'start stop status' svc" in printed.out;
+    generated=shell.run_line("compgen -W 'alpha beta alpine' al",capture=True);
+    assert generated.out.splitlines()==["alpha","alpine"];
+    shell.run_line("complete -r svc",capture=True);
+    assert "svc" not in shell.completion_specs;
+
+
+def test_complete_directory_action(tmp_path):
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"PATH":""},cwd=tmp_path);
+    (tmp_path/"docs").mkdir(); (tmp_path/"data.txt").write_text("x",encoding="utf-8");
+    assert shell.run_line("complete -d jump",capture=True).code==0;
+    assert shell._completion_engine.candidates("jump d")==["docs/"];

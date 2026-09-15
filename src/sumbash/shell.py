@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a5.
+"""Small portable shell core for sumbash 0.1.0a6.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -34,6 +34,7 @@ import sys;
 
 from .applets import APPLETS, AppletResult, run_applet;
 from .arithmetic import SumArithmeticError, evaluate, format_number;
+from .completion import CompletionEngine, CompletionSpec, format_completion_spec, parse_completion_spec, spec_candidates;
 
 
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$");
@@ -73,6 +74,9 @@ class ShellRuntime:
         self._readline = None;
         self._history_loaded = False;
         self._history_file = None;
+        self.completion_specs = {};
+        self._completion_engine = CompletionEngine(self);
+        self._completion_cache = [];
         try: self._stdout_is_tty = bool(sys.stdout.isatty());
         except Exception: self._stdout_is_tty = False;
         self._command_stdout_is_tty = self._stdout_is_tty;
@@ -124,7 +128,7 @@ class ShellRuntime:
         return shutil.which(name, path=self.vars.get("PATH", os.environ.get("PATH","")));
 
     def _builtin_names(self):
-        return {"cd","export","global","unset","readonly","set","shopt","alias","unalias","command","type","source",".","eval","read","inkey","history","exit","logout","true","false","let"};
+        return {"cd","export","global","unset","readonly","set","shopt","alias","unalias","command","type","source",".","eval","read","inkey","history","complete","compgen","compopt","exit","logout","true","false","let"};
 
     # ---------- expansion ----------
     def _expand_parameter(self, body):
@@ -496,6 +500,9 @@ class ShellRuntime:
         if name=="shopt": return self._bi_shopt(args);
         if name=="set": return self._bi_set(args);
         if name=="history": return self._bi_history(args);
+        if name=="complete": return self._bi_complete(args);
+        if name=="compgen": return self._bi_compgen(args);
+        if name=="compopt": return self._bi_compopt(args);
         if name=="read": return self._bi_read(args,stdin);
         if name=="inkey": return self._bi_inkey(args);
         if name=="let":
@@ -645,6 +652,12 @@ class ShellRuntime:
         try:
             readline.parse_and_bind("set editing-mode {}".format("vi" if self.shell_options.get("vi") else "emacs"));
             readline.parse_and_bind(r'"\C-l": clear-screen');
+            readline.parse_and_bind("tab: complete");
+            readline.parse_and_bind("set show-all-if-ambiguous off");
+            readline.parse_and_bind("set show-all-if-unmodified off");
+            # Keep path punctuation inside the current word; separators still break commands.
+            readline.set_completer_delims(" \t\n;|&<>()");
+            readline.set_completer(self._completion_engine.readline_completer);
         except Exception: pass;
         try:
             readline.set_history_length(self._history_file_limit());
@@ -703,6 +716,40 @@ class ShellRuntime:
         rows=self.history[-count:] if count is not None else self.history;
         offset=len(self.history)-len(rows);
         return Execution(out="".join("{:5d}  {}\n".format(offset+i+1,v) for i,v in enumerate(rows)));
+
+    def _bi_complete(self,args):
+        try: spec,names,print_mode,remove=parse_completion_spec(args);
+        except ValueError as exc: return Execution(2,err="complete: {}\n".format(exc));
+        if print_mode:
+            selected=names or sorted(self.completion_specs); out=[]; code=0;
+            for name in selected:
+                current=self.completion_specs.get(name);
+                if current is None: code=1; continue;
+                out.append(format_completion_spec(name,current)+"\n");
+            return Execution(code,out="".join(out));
+        if remove:
+            if names:
+                for name in names: self.completion_specs.pop(name,None);
+            else: self.completion_specs.clear();
+            return Execution();
+        if not names: return Execution(2,err="complete: command name required\n");
+        for name in names: self.completion_specs[name]=CompletionSpec(actions=list(spec.actions),words=list(spec.words),options=set(spec.options),prefix=spec.prefix,suffix=spec.suffix,filter_pattern=spec.filter_pattern,function=spec.function);
+        return Execution();
+
+    def _bi_compgen(self,args):
+        try: spec,names,unused_print,unused_remove=parse_completion_spec(args);
+        except ValueError as exc: return Execution(2,err="compgen: {}\n".format(exc));
+        prefix=names[-1] if names else "";
+        if not spec.actions and not spec.words:
+            spec.actions.append("command");
+        values=spec_candidates(spec,prefix,self);
+        return Execution(out="".join(value+"\n" for value in values));
+
+    def _bi_compopt(self,args):
+        # The command is present now so completion scripts can probe for it.
+        # Function-scoped programmable completion arrives with shell functions;
+        # until then there is no active completion function whose options can be changed.
+        return Execution(1,err="compopt: not currently executing a completion function\n");
 
     def _bi_read(self,args,stdin):
         timeout=None; prompt=""; silent=False; nchars=None; names=[]; i=0;
