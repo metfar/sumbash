@@ -21,9 +21,20 @@ import os;
 from pathlib import Path;
 import re;
 import shutil;
+import shlex;
+import stat;
 import socket;
 import sys;
 import time;
+
+try:
+    import pwd as _pwd;
+except ImportError:
+    _pwd=None;
+try:
+    import grp as _grp;
+except ImportError:
+    _grp=None;
 
 from sumcore import info as suminfo;
 
@@ -80,6 +91,12 @@ def app_printf(argv, stdin="", runtime=None):
 
 
 def app_cat(argv, stdin="", runtime=None):
+    # With no operands, cat reads standard input.  When sumbash owns an
+    # interactive terminal this deliberately reads the real TTY until EOF
+    # (Ctrl-D on POSIX), so `cat > file` behaves like the traditional command.
+    if not argv and runtime is not None and getattr(runtime,"_command_stdin_is_tty",False):
+        try: stdin=sys.stdin.read();
+        except (EOFError,KeyboardInterrupt): stdin="";
     out=[]; err=[]; code=0;
     for name, value in _read_paths(argv, stdin):
         if isinstance(value, Exception): err.append("cat: {}: {}\n".format(name, value)); code=1;
@@ -136,11 +153,15 @@ def app_sleep(argv, stdin="", runtime=None):
     except ValueError: return AppletResult(1, err="sleep: invalid time interval\n");
 
 
-def _human_size(value):
+def _human_size(value,base=1024):
     n=float(value);
-    for suffix in ("B","K","M","G","T","P"):
-        if abs(n)<1024 or suffix=="P": return ("{:.0f}{}" if suffix=="B" else "{:.1f}{}").format(n,suffix);
-        n/=1024;
+    suffixes=("B","K","M","G","T","P","E");
+    for suffix in suffixes:
+        if abs(n)<base or suffix==suffixes[-1]:
+            if suffix=="B": return "{}B".format(int(n));
+            text="{:.1f}".format(n).rstrip("0").rstrip(".");
+            return text+suffix;
+        n/=base;
 
 
 def _parse_ls_colors(value):
@@ -178,67 +199,408 @@ def _ls_color_key(path, colors):
 def _ls_colored_name(path, name, colors, enabled):
     if not enabled or not colors: return name;
     key=_ls_color_key(path,colors); code=colors.get(key,"");
-    if not code or code=="0" or code=="00": return name;
+    if not code or code in ("0","00"): return name;
     return "\x1b[{}m{}\x1b[0m".format(code,name);
 
 
+def _ls_parse_block_size(text):
+    raw=str(text).strip();
+    m=re.fullmatch(r"([0-9]+)([KMGTEP]?)(i?B)?",raw,re.I);
+    if not m: raise ValueError("invalid block size: {}".format(text));
+    value=int(m.group(1)); suffix=m.group(2).upper(); unit=(m.group(3) or "");
+    power={"":0,"K":1,"M":2,"G":3,"T":4,"P":5,"E":6}[suffix];
+    base=1024 if unit.lower()=="ib" or unit=="" else 1000;
+    return value*(base**power);
+
+
+def _ls_owner(uid,numeric=False):
+    if numeric or _pwd is None: return str(uid);
+    try: return _pwd.getpwuid(uid).pw_name;
+    except (KeyError,OSError): return str(uid);
+
+
+def _ls_group(gid,numeric=False):
+    if numeric or _grp is None: return str(gid);
+    try: return _grp.getgrgid(gid).gr_name;
+    except (KeyError,OSError): return str(gid);
+
+
+def _ls_quote(name,style,hide_controls=False,show_controls=False):
+    value=str(name);
+    if hide_controls and not show_controls:
+        value="".join(ch if (ch.isprintable() or ch in "\t") else "?" for ch in value);
+    style=style or "literal";
+    if style in ("literal","locale","clocale"): return value;
+    if style in ("shell","shell-always"): return shlex.quote(value);
+    if style in ("shell-escape","shell-escape-always","escape"):
+        out=[];
+        for ch in value:
+            code=ord(ch);
+            if ch==" ": out.append("\\ ");
+            elif ch in "\\\"'`$&;|<>*?[](){}!": out.append("\\"+ch);
+            elif ch=="\n": out.append("\\n");
+            elif ch=="\t": out.append("\\t");
+            elif code<32 or code==127: out.append("\\x{:02x}".format(code));
+            else: out.append(ch);
+        return "".join(out);
+    if style in ("c",):
+        escaped=value.encode("unicode_escape").decode("ascii").replace('"','\\"');
+        return '"{}"'.format(escaped);
+    return value;
+
+
+def _ls_indicator(path,style):
+    if style in (None,"none","never"): return "";
+    try:
+        if path.is_dir(): return "/";
+        if path.is_symlink(): return "@";
+        if path.is_fifo(): return "|";
+        if path.is_socket(): return "=";
+        if style=="classify" and path.is_file() and os.access(path,os.X_OK): return "*";
+    except OSError: pass;
+    return "";
+
+
+def _ls_time_value(st,field):
+    field=(field or "mtime").lower();
+    if field in ("atime","access","use"): return st.st_atime;
+    if field in ("ctime","status"): return st.st_ctime;
+    if field in ("birth","creation"):
+        return getattr(st,"st_birthtime",st.st_ctime);
+    return st.st_mtime;
+
+
+def _ls_time_text(ts,style):
+    dt=datetime.fromtimestamp(ts).astimezone(); style=style or "locale";
+    if style.startswith("+"): return dt.strftime(style[1:]);
+    if style=="full-iso": return dt.strftime("%Y-%m-%d %H:%M:%S.%f %z");
+    if style=="long-iso": return dt.strftime("%Y-%m-%d %H:%M");
+    if style=="iso": return dt.strftime("%Y-%m-%d %H:%M");
+    return dt.strftime("%b %d %H:%M").replace(" 0","  ");
+
+
+def _ls_version_key(value):
+    return tuple(int(x) if x.isdigit() else x.casefold() for x in re.split(r"([0-9]+)",str(value)));
+
+
+def _ls_help():
+    return """List directory contents.\nIgnore files and directories starting with a '.' by default\n\nUsage: ls [OPTION]... [FILE]...\n\nPortable SUM ls options include:\n  -C, -1, -x, -m, -l, -o, -g, -n, -a, -A, -d, -R\n  -h, --si, -i, -s, -r, -S, -t, -v, -X, -U, -F, -p\n  -L, -H, -B, -I PATTERN, --hide PATTERN\n  --color[=always|auto|never], --sort=FIELD, --time=FIELD\n  --time-style=STYLE, --full-time, --group-directories-first\n  --indicator-style=STYLE, --file-type, --quoting-style=STYLE\n  --hyperlink[=always|auto|never], --zero, --block-size=SIZE\n  -w COLS, -T COLS, -Z, --author, --version, --help\n""";
+
+
 def app_ls(argv, stdin="", runtime=None):
-    show_all=False; long=False; human=False; classify=False; paths=[]; color_mode=None;
-    i=0; args=list(argv);
-    while i<len(args):
-        arg=args[i];
-        if arg=="--": paths.extend(args[i+1:]); break;
-        if arg=="--color": color_mode="always"; i+=1; continue;
-        if arg.startswith("--color="):
-            color_mode=arg.split("=",1)[1].lower();
-            if color_mode not in ("always","auto","never"): return AppletResult(2,err="ls: invalid argument '{}' for --color\n".format(color_mode));
-            i+=1; continue;
-        if arg in ("--all",): show_all=True; i+=1; continue;
-        if arg.startswith("-") and arg != "-" and not arg.startswith("--"):
-            flags=arg[1:];
-            show_all = show_all or "a" in flags;
-            long = long or "l" in flags;
-            human = human or "h" in flags;
-            classify = classify or "F" in flags;
-            i+=1; continue;
-        paths.append(arg); i+=1;
-    if not paths: paths=["."];
+    opts={
+        "show_all":False,"almost_all":False,"long":False,"human":False,"si":False,
+        "format":None,"no_owner":False,"no_group":False,"numeric":False,"classify":None,
+        "paths":[],"color":None,"sort":"name","reverse":False,"recursive":False,
+        "directory":False,"dereference":False,"deref_cmd":False,"deref_cmd_dir":False,
+        "inode":False,"blocks":False,"block_size":1024,"size_scale":1,"width":None,"tabsize":8,
+        "ignore":[],"hide":[],"ignore_backups":False,"group_dirs":False,
+        "time_field":"mtime","time_style":None,"quote":"literal","hide_controls":False,
+        "show_controls":False,"hyperlink":"never","zero":False,"context":False,
+        "author":False,"dired":False,"color_explicit":False,
+    };
+    args=list(argv); i=0;
+    def need(opt):
+        nonlocal i;
+        if i+1>=len(args): raise ValueError("ls: option {} requires an argument".format(opt));
+        i+=1; return args[i];
+    try:
+        while i<len(args):
+            arg=args[i];
+            if arg=="--": opts["paths"].extend(args[i+1:]); break;
+            if arg in ("--help",): return AppletResult(out=_ls_help());
+            if arg in ("--version","-V"): return AppletResult(out="sumbash ls 0.1.0a5\n");
+            if arg.startswith("--"):
+                key,val=(arg[2:].split("=",1)+[None])[:2] if "=" in arg else (arg[2:],None);
+                if key=="format": opts["format"]=val or need(arg);
+                elif key=="long": opts["long"]=True;
+                elif key=="tabsize": opts["tabsize"]=int(val or need(arg));
+                elif key=="zero": opts["zero"]=True; opts["format"]="zero";
+                elif key=="dired": opts["dired"]=True;
+                elif key=="hyperlink": opts["hyperlink"]=(val or "always").lower();
+                elif key=="numeric-uid-gid": opts["numeric"]=True; opts["long"]=True;
+                elif key=="quoting-style": opts["quote"]=val or need(arg);
+                elif key=="literal": opts["quote"]="literal";
+                elif key=="escape": opts["quote"]="escape";
+                elif key=="quote-name": opts["quote"]="c";
+                elif key=="hide-control-chars": opts["hide_controls"]=True;
+                elif key=="show-control-chars": opts["show_controls"]=True;
+                elif key=="time": opts["time_field"]=(val or need(arg));
+                elif key=="hide": opts["hide"].append(val or need(arg));
+                elif key=="ignore": opts["ignore"].append(val or need(arg));
+                elif key=="ignore-backups": opts["ignore_backups"]=True;
+                elif key=="sort": opts["sort"]=(val or need(arg)).lower();
+                elif key=="dereference": opts["dereference"]=True;
+                elif key=="dereference-command-line": opts["deref_cmd"]=True;
+                elif key=="dereference-command-line-symlink-to-dir": opts["deref_cmd_dir"]=True;
+                elif key=="no-group": opts["no_group"]=True;
+                elif key=="author": opts["author"]=True; opts["long"]=True;
+                elif key=="all": opts["show_all"]=True;
+                elif key=="almost-all": opts["almost_all"]=True;
+                elif key=="directory": opts["directory"]=True;
+                elif key=="human-readable": opts["human"]=True;
+                elif key=="kibibytes": opts["block_size"]=1024;
+                elif key=="si": opts["si"]=True; opts["human"]=True;
+                elif key=="block-size":
+                    opts["block_size"]=_ls_parse_block_size(val or need(arg)); opts["size_scale"]=opts["block_size"];
+                elif key=="inode": opts["inode"]=True;
+                elif key=="reverse": opts["reverse"]=True;
+                elif key=="recursive": opts["recursive"]=True;
+                elif key=="width": opts["width"]=int(val or need(arg));
+                elif key=="size": opts["blocks"]=True;
+                elif key=="color": opts["color"]=(val or "always").lower(); opts["color_explicit"]=True;
+                elif key=="indicator-style": opts["classify"]=(val or need(arg)).lower();
+                elif key=="classify": opts["classify"]=(val or "classify").lower();
+                elif key=="file-type": opts["classify"]="file-type";
+                elif key=="time-style": opts["time_style"]=(val or need(arg));
+                elif key=="full-time": opts["long"]=True; opts["time_style"]="full-iso";
+                elif key=="context": opts["context"]=True; opts["long"]=True;
+                elif key=="group-directories-first": opts["group_dirs"]=True;
+                else: return AppletResult(2,err="ls: unrecognized option '--{}'\n".format(key));
+                i+=1; continue;
+            if arg.startswith("-") and arg!="-":
+                cluster=arg[1:]; j=0;
+                while j<len(cluster):
+                    ch=cluster[j];
+                    if ch in ("T","w","I"):
+                        value=cluster[j+1:] if j+1<len(cluster) else need("-"+ch);
+                        if ch=="T": opts["tabsize"]=int(value);
+                        elif ch=="w": opts["width"]=int(value);
+                        else: opts["ignore"].append(value);
+                        j=len(cluster); continue;
+                    if ch=="C": opts["format"]="columns";
+                    elif ch=="l": opts["long"]=True;
+                    elif ch=="x": opts["format"]="rows";
+                    elif ch=="m": opts["format"]="commas";
+                    elif ch=="1": opts["format"]="single";
+                    elif ch=="o": opts["long"]=True; opts["no_group"]=True;
+                    elif ch=="g": opts["long"]=True; opts["no_owner"]=True;
+                    elif ch=="n": opts["long"]=True; opts["numeric"]=True;
+                    elif ch=="N": opts["quote"]="literal";
+                    elif ch=="b": opts["quote"]="escape";
+                    elif ch=="Q": opts["quote"]="c";
+                    elif ch=="q": opts["hide_controls"]=True;
+                    elif ch=="c": opts["time_field"]="ctime";
+                    elif ch=="u": opts["time_field"]="atime";
+                    elif ch=="B": opts["ignore_backups"]=True;
+                    elif ch=="S": opts["sort"]="size";
+                    elif ch=="t": opts["sort"]="time";
+                    elif ch=="v": opts["sort"]="version";
+                    elif ch=="X": opts["sort"]="extension";
+                    elif ch=="U": opts["sort"]="none";
+                    elif ch=="L": opts["dereference"]=True;
+                    elif ch=="H": opts["deref_cmd"]=True;
+                    elif ch=="G": opts["no_group"]=True;
+                    elif ch=="a": opts["show_all"]=True;
+                    elif ch=="A": opts["almost_all"]=True;
+                    elif ch=="f": opts["show_all"]=True; opts["sort"]="none"; opts["group_dirs"]=False;
+                    elif ch=="d": opts["directory"]=True;
+                    elif ch=="h": opts["human"]=True;
+                    elif ch=="k": opts["block_size"]=1024;
+                    elif ch=="i": opts["inode"]=True;
+                    elif ch=="r": opts["reverse"]=True;
+                    elif ch=="R": opts["recursive"]=True;
+                    elif ch=="s": opts["blocks"]=True;
+                    elif ch=="F": opts["classify"]="classify";
+                    elif ch=="p": opts["classify"]="slash";
+                    elif ch=="Z": opts["context"]=True; opts["long"]=True;
+                    elif ch=="D": opts["dired"]=True;
+                    else: return AppletResult(2,err="ls: invalid option -- '{}'\n".format(ch));
+                    j+=1;
+                i+=1; continue;
+            opts["paths"].append(arg); i+=1;
+    except (ValueError,TypeError) as exc:
+        return AppletResult(2,err="{}\n".format(exc));
+    if opts["color"] not in (None,"always","auto","never"): return AppletResult(2,err="ls: invalid --color value\n");
+    if opts["hyperlink"] not in ("always","auto","never"): return AppletResult(2,err="ls: invalid --hyperlink value\n");
+    if opts["sort"] not in ("name","none","time","size","version","extension","width"): return AppletResult(2,err="ls: invalid --sort value\n");
+    if opts["format"] is not None:
+        aliases={"vertical":"columns","across":"rows","horizontal":"rows","commas":"commas","long":"long","verbose":"long","single-column":"single"};
+        opts["format"]=aliases.get(opts["format"],opts["format"]);
+        if opts["format"]=="long": opts["long"]=True;
+        if opts["format"] not in ("columns","rows","commas","long","single","zero"): return AppletResult(2,err="ls: invalid --format value\n");
+    if not opts["paths"]: opts["paths"]=["."];
     env=(runtime.vars if runtime is not None else os.environ); ls_colors=env.get("LS_COLORS",""); colors=_parse_ls_colors(ls_colors);
-    # SUM convenience: an exported LS_COLORS enables color automatically.
-    # --color=never always disables it, and --color=always forces it through pipes.
-    if color_mode is None: color_mode="auto" if ls_colors else "never";
+    if opts["color"] is None: opts["color"]="auto" if ls_colors else "never";
+    if opts["sort"]=="none" and not opts["color_explicit"] and "f" in "".join(a[1:] for a in argv if a.startswith("-") and not a.startswith("--")): opts["color"]="never";
     output_tty=getattr(runtime,"_command_stdout_is_tty",None) if runtime is not None else None;
     if output_tty is None:
         try: output_tty=sys.stdout.isatty();
         except Exception: output_tty=False;
-    use_color=(color_mode=="always" or (color_mode=="auto" and bool(output_tty)));
-    out=[]; err=[]; code=0;
-    for pindex, raw in enumerate(paths):
-        base=Path(runtime.cwd if runtime is not None else os.getcwd()); p=Path(raw); p=p if p.is_absolute() else base/p;
-        try:
-            items=[p] if not p.is_dir() else sorted(p.iterdir(), key=lambda x:x.name.casefold());
-        except OSError as exc: err.append("ls: {}: {}\n".format(raw,exc)); code=2; continue;
-        if len(paths)>1: out.append("{}:\n".format(raw));
-        for item in items:
-            if item.name.startswith(".") and not show_all and item != p: continue;
-            raw_name=item.name if item != p else raw; suffix="";
-            if classify:
-                if item.is_dir(): suffix="/";
-                elif item.is_symlink(): suffix="@";
-                elif os.access(item, os.X_OK): suffix="*";
-            name=_ls_colored_name(item,raw_name,colors,use_color)+suffix;
-            if long:
-                try:
-                    st=item.lstat(); mode="d" if item.is_dir() else ("l" if item.is_symlink() else "-");
-                    perms="".join("rwx"[i%3] if st.st_mode & (1 << (8-i)) else "-" for i in range(9));
-                    size=_human_size(st.st_size) if human else str(st.st_size);
-                    stamp=datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M");
-                    out.append("{}{} {:>8} {} {}\n".format(mode,perms,size,stamp,name));
-                except OSError as exc: err.append("ls: {}: {}\n".format(raw,exc)); code=1;
-            else: out.append(name+"\n");
-        if pindex+1<len(paths): out.append("\n");
-    return AppletResult(code,"".join(out),"".join(err));
+    use_color=(opts["color"]=="always" or (opts["color"]=="auto" and bool(output_tty)));
+    use_hyper=(opts["hyperlink"]=="always" or (opts["hyperlink"]=="auto" and bool(output_tty)));
+    if opts["format"] is None: opts["format"]="columns" if output_tty and not opts["long"] else "single";
+    if opts["long"]: opts["format"]="long";
+    if opts["zero"]: opts["format"]="zero";
+    if opts["time_style"] is None: opts["time_style"]=env.get("TIME_STYLE") or "locale";
+    width=opts["width"] or shutil.get_terminal_size((80,24)).columns;
+    base=Path(runtime.cwd if runtime is not None else os.getcwd()); out=[]; err=[]; code=0;
 
+    def make_entry(path,name=None,cmdline=False):
+        display=name if name is not None else path.name;
+        try: st=path.stat() if opts["dereference"] or (cmdline and opts["deref_cmd"]) else path.lstat();
+        except OSError as exc: return {"path":path,"name":display,"error":exc,"cmdline":cmdline};
+        return {"path":path,"name":display,"st":st,"cmdline":cmdline};
+
+    def entry_is_dir(entry,for_walk=False):
+        path=entry["path"];
+        try:
+            if path.is_symlink() and not opts["dereference"]:
+                if entry.get("cmdline") and (opts["deref_cmd"] or opts["deref_cmd_dir"]): return path.resolve().is_dir();
+                return False;
+            return path.is_dir();
+        except OSError: return False;
+
+    def visible(entry):
+        name=entry["name"];
+        if name in (".",".."): return opts["show_all"];
+        if name.startswith(".") and not (opts["show_all"] or opts["almost_all"]): return False;
+        if opts["ignore_backups"] and name.endswith("~"): return False;
+        if any(fnmatch.fnmatchcase(name,p) for p in opts["ignore"]): return False;
+        if not (opts["show_all"] or opts["almost_all"]) and any(fnmatch.fnmatchcase(name,p) for p in opts["hide"]): return False;
+        return True;
+
+    def sort_entries(entries):
+        if opts["sort"]=="none": ordered=list(entries);
+        else:
+            def key(e):
+                st=e.get("st"); name=e["name"];
+                if opts["sort"]=="size": return st.st_size if st else -1;
+                if opts["sort"]=="time": return _ls_time_value(st,opts["time_field"]) if st else 0;
+                if opts["sort"]=="version": return _ls_version_key(name);
+                if opts["sort"]=="extension": return (Path(name).suffix.casefold(),name.casefold());
+                if opts["sort"]=="width": return (len(name),name.casefold());
+                return name.casefold();
+            ordered=sorted(entries,key=key,reverse=opts["reverse"]);
+            if opts["sort"] in ("size","time") and not opts["reverse"]: ordered.reverse();
+        if opts["sort"]=="none" and opts["reverse"]: ordered.reverse();
+        if opts["group_dirs"] and opts["sort"]!="none":
+            dirs=[e for e in ordered if entry_is_dir(e)]; files=[e for e in ordered if not entry_is_dir(e)]; ordered=dirs+files;
+        return ordered;
+
+    def decorated(entry):
+        path=entry["path"]; name=_ls_quote(entry["name"],opts["quote"],opts["hide_controls"],opts["show_controls"]);
+        suffix="";
+        style=opts["classify"];
+        if style=="slash": suffix="/" if entry_is_dir(entry) else "";
+        elif style in ("file-type","classify","always","auto"):
+            if style!="auto" or output_tty: suffix=_ls_indicator(path,"classify" if style in ("classify","always","auto") else "file-type");
+        shown=_ls_colored_name(path,name,colors,use_color)+suffix;
+        if use_hyper:
+            try: shown="\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\".format(path.resolve().as_uri(),shown);
+            except (OSError,ValueError): pass;
+        return shown;
+
+    def scaled_size(value):
+        if opts["human"]: return _human_size(value,1000 if opts["si"] else 1024);
+        scale=opts["size_scale"];
+        if scale!=1: return str((int(value)+scale-1)//scale);
+        return str(value);
+
+    def block_count(st):
+        raw=getattr(st,"st_blocks",(st.st_size+511)//512)*512;
+        return (raw+opts["block_size"]-1)//opts["block_size"];
+
+    def security_context(path):
+        if hasattr(os,"getxattr"):
+            try: return os.getxattr(path,"security.selinux",follow_symlinks=opts["dereference"]).decode(errors="replace").rstrip("\x00");
+            except (OSError,ValueError,TypeError): pass;
+        return "?";
+
+    def long_line(entry):
+        if "error" in entry: return None;
+        st=entry["st"]; fields=[];
+        if opts["inode"]: fields.append(str(st.st_ino));
+        if opts["blocks"]: fields.append(str(block_count(st)));
+        fields.append(stat.filemode(st.st_mode)); fields.append(str(getattr(st,"st_nlink",1)));
+        owner=_ls_owner(getattr(st,"st_uid",0),opts["numeric"]); group=_ls_group(getattr(st,"st_gid",0),opts["numeric"]);
+        if not opts["no_owner"]: fields.append(owner);
+        if not opts["no_group"]: fields.append(group);
+        if opts["author"]: fields.append(owner);
+        if opts["context"]: fields.append(security_context(entry["path"]));
+        fields.append(scaled_size(st.st_size)); fields.append(_ls_time_text(_ls_time_value(st,opts["time_field"]),opts["time_style"]));
+        name=decorated(entry);
+        if entry["path"].is_symlink() and not opts["dereference"]:
+            try: name += " -> "+_ls_quote(os.readlink(entry["path"]),opts["quote"]);
+            except OSError: pass;
+        fields.append(name); return " ".join(fields);
+
+    def plain_lines(entries):
+        names=[];
+        for e in entries:
+            prefix=[];
+            if "error" in e: continue;
+            st=e["st"];
+            if opts["inode"]: prefix.append(str(st.st_ino));
+            if opts["blocks"]: prefix.append(str(block_count(st)));
+            prefix.append(decorated(e)); names.append((" ".join(prefix),len(" ".join(prefix[:-1]+[_ls_quote(e["name"],opts["quote"])]))));
+        fmt=opts["format"];
+        if fmt=="zero": return "\0".join(v for v,w in names)+("\0" if names else "");
+        if fmt=="commas": return ", ".join(v for v,w in names)+("\n" if names else "");
+        if fmt=="single": return "".join(v+"\n" for v,w in names);
+        if not names: return "";
+        maxw=max(w for v,w in names)+2; cols=max(1,width//maxw); rows=(len(names)+cols-1)//cols;
+        lines=[];
+        if fmt=="rows":
+            for r in range(rows):
+                chunk=names[r*cols:(r+1)*cols]; lines.append("".join(v+(" "*max(0,maxw-w) if j<len(chunk)-1 else "") for j,(v,w) in enumerate(chunk)).rstrip());
+        else:
+            for r in range(rows):
+                cells=[];
+                for c in range(cols):
+                    idx=c*rows+r;
+                    if idx>=len(names): continue;
+                    v,w=names[idx]; cells.append(v+(" "*max(0,maxw-w) if c<cols-1 else ""));
+                lines.append("".join(cells).rstrip());
+        return "\n".join(lines)+"\n";
+
+    def list_directory(path,label,show_header,recursive=False):
+        nonlocal code;
+        try:
+            raw=[make_entry(child,child.name) for child in path.iterdir()];
+            if opts["show_all"]: raw=[make_entry(path,"."),make_entry(path.parent,"..")] + raw;
+        except OSError as exc:
+            err.append("ls: {}: {}\n".format(label,exc)); code=2; return;
+        entries=[];
+        for e in raw:
+            if "error" in e: err.append("ls: {}: {}\n".format(e["path"],e["error"])); code=max(code,1); continue;
+            if visible(e): entries.append(e);
+        entries=sort_entries(entries);
+        if show_header: out.append("{}:\n".format(label));
+        if opts["long"] or opts["blocks"]:
+            total=sum(block_count(e["st"]) for e in entries if "st" in e); out.append("total {}\n".format(total));
+        if opts["long"]:
+            for e in entries:
+                line=long_line(e);
+                if line is not None: out.append(line+"\n");
+        else: out.append(plain_lines(entries));
+        if recursive:
+            subs=[e for e in entries if e["name"] not in (".","..") and entry_is_dir(e,for_walk=True)];
+            for e in subs:
+                out.append("\n"); list_directory(e["path"],str(e["path"]),True,True);
+
+    operands=[];
+    for raw in opts["paths"]:
+        p=Path(raw).expanduser(); p=p if p.is_absolute() else base/p; e=make_entry(p,raw,cmdline=True);
+        if "error" in e: err.append("ls: {}: {}\n".format(raw,e["error"])); code=2; continue;
+        operands.append(e);
+    files=[]; dirs=[];
+    for e in operands:
+        if not opts["directory"] and entry_is_dir(e): dirs.append(e);
+        else: files.append(e);
+    if files:
+        files=sort_entries(files);
+        if opts["long"]:
+            for e in files: out.append(long_line(e)+"\n");
+        else: out.append(plain_lines(files));
+        if dirs: out.append("\n");
+    for idx,e in enumerate(dirs):
+        label=e["name"]; header=len(dirs)>1 or bool(files) or opts["recursive"];
+        list_directory(e["path"],label,header,opts["recursive"]);
+        if idx+1<len(dirs): out.append("\n");
+    # --dired is accepted for script compatibility; offsets are intentionally not
+    # emitted yet because ANSI/hyperlink-aware byte offsets need a dedicated pass.
+    return AppletResult(code,"".join(out),"".join(err));
 
 def app_find(argv, stdin="", runtime=None):
     args=list(argv); roots=[];

@@ -61,3 +61,64 @@ def test_prompt_supports_octal_ansi_and_hostname_fallback(monkeypatch, tmp_path)
     prompt=shell.prompt();
     assert prompt.startswith("\x1b[31m x1b5ca \x1b[0m ~ > ");
     assert "\\033" not in prompt;
+
+
+def test_external_interactive_command_inherits_terminal(monkeypatch,tmp_path):
+    import types;
+    shell=ShellRuntime(cwd=tmp_path,interactive=True);
+    shell._stdout_is_tty=True; shell._command_stdout_is_tty=True;
+    monkeypatch.setattr(shell,"_which_external",lambda name:"/usr/bin/mc" if name=="mc" else None);
+    monkeypatch.setattr("sumbash.shell.sys.stdin.isatty",lambda:True);
+    monkeypatch.setattr("sumbash.shell.sys.stdout.isatty",lambda:True);
+    monkeypatch.setattr("sumbash.shell.sys.stderr.isatty",lambda:True);
+    calls=[];
+    def fake_run(cmd,**kwargs):
+        calls.append((cmd,kwargs)); return types.SimpleNamespace(returncode=0,stdout="",stderr="");
+    monkeypatch.setattr("sumbash.shell.subprocess.run",fake_run);
+    result=shell.run_line("mc",capture=True);
+    assert result.code==0;
+    assert calls;
+    kwargs=calls[0][1];
+    assert "stdout" not in kwargs and "stderr" not in kwargs and "input" not in kwargs;
+
+
+def test_history_recording_controls_and_builtin(tmp_path):
+    shell=ShellRuntime(env={"HOME":str(tmp_path),"HISTSIZE":"3","HISTCONTROL":"ignoredups"},interactive=True);
+    shell.run_line("echo one",capture=True);
+    shell.run_line("echo one",capture=True);
+    shell.run_line("echo two",capture=True);
+    shell.run_line("echo three",capture=True);
+    shell.run_line("echo four",capture=True);
+    assert shell.history==["echo two","echo three","echo four"];
+    shown=shell.run_line("history 2",capture=True).out;
+    assert "echo four" in shown and "history 2" in shown;
+
+
+def test_cat_reads_interactive_stdin_until_eof(monkeypatch,tmp_path):
+    shell=ShellRuntime(cwd=tmp_path,interactive=True);
+    shell._stdout_is_tty=True;
+    monkeypatch.setattr("sumbash.shell.sys.stdin.isatty",lambda:True);
+    monkeypatch.setattr("sumbash.applets.sys.stdin.read",lambda:"Blabla\n");
+    result=shell.run_line("cat > archivo",capture=True);
+    assert result.code==0;
+    assert result.out=="";
+    assert (tmp_path/"archivo").read_text(encoding="utf-8")=="Blabla\n";
+
+
+def test_logout_is_exit_alias():
+    import pytest;
+    from sumbash.shell import ShellExit;
+    shell=ShellRuntime(interactive=True);
+    with pytest.raises(ShellExit) as exc:
+        shell.run_line("logout 7",capture=True);
+    assert exc.value.code==7;
+
+
+def test_interactive_ctrl_d_exits(monkeypatch,tmp_path):
+    shell=ShellRuntime(env={"HOME":str(tmp_path)},cwd=tmp_path,interactive=True);
+    monkeypatch.setattr(shell,"_setup_readline",lambda:None);
+    monkeypatch.setattr(shell,"_write_history",lambda:None);
+    def eof(_prompt):
+        raise EOFError;
+    monkeypatch.setattr("builtins.input",eof);
+    assert shell.interactive_loop()==0;

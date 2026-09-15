@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a3.
+"""Small portable shell core for sumbash 0.1.0a5.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -70,9 +70,13 @@ class ShellRuntime:
         self.history = [];
         self.pid = os.getpid();
         self._source_depth = 0;
+        self._readline = None;
+        self._history_loaded = False;
+        self._history_file = None;
         try: self._stdout_is_tty = bool(sys.stdout.isatty());
         except Exception: self._stdout_is_tty = False;
         self._command_stdout_is_tty = self._stdout_is_tty;
+        self._command_stdin_is_tty = bool(self.interactive and getattr(sys.stdin,"isatty",lambda:False)());
 
     def get(self, name, default=""):
         if name == "?": return str(self.last_status);
@@ -120,7 +124,7 @@ class ShellRuntime:
         return shutil.which(name, path=self.vars.get("PATH", os.environ.get("PATH","")));
 
     def _builtin_names(self):
-        return {"cd","export","global","unset","readonly","set","shopt","alias","unalias","command","type","source",".","eval","read","inkey","history","exit","true","false","let"};
+        return {"cd","export","global","unset","readonly","set","shopt","alias","unalias","command","type","source",".","eval","read","inkey","history","exit","logout","true","false","let"};
 
     # ---------- expansion ----------
     def _expand_parameter(self, body):
@@ -279,7 +283,7 @@ class ShellRuntime:
     def run_line(self,line,capture=False,stdin=""):
         line=str(line).rstrip("\n");
         if not line.strip(): return Execution();
-        if self.interactive: self.history.append(line);
+        self._record_history(line);
         try: result=self._run_raw_sequence(line,stdin=stdin);
         except ValueError as exc: return Execution(2,err="sumbash: {}\n".format(exc));
         self.last_status=result.code;
@@ -336,7 +340,8 @@ class ShellRuntime:
         pieces,unused=self._split_raw(line,("|",)); data=stdin; err=[]; code=0;
         for index,piece in enumerate(pieces):
             tokens=self.tokenize(piece);
-            result=self._run_command(tokens,stdin=data,stdout_is_tty=(self._stdout_is_tty and index==len(pieces)-1)); data=result.out; code=result.code;
+            stdin_is_tty=bool(index==0 and data=="" and self.interactive and getattr(sys.stdin,"isatty",lambda:False)());
+            result=self._run_command(tokens,stdin=data,stdout_is_tty=(self._stdout_is_tty and index==len(pieces)-1),stdin_is_tty=stdin_is_tty); data=result.out; code=result.code;
             if result.err: err.append(result.err);
         return Execution(code,data,"".join(err));
 
@@ -375,20 +380,23 @@ class ShellRuntime:
         commands.append(cur);
         data=stdin; stderr=[]; code=0;
         for index,command in enumerate(commands):
-            result=self._run_command(command,stdin=data,stdout_is_tty=(self._stdout_is_tty and index==len(commands)-1)); data=result.out; code=result.code;
+            stdin_is_tty=bool(index==0 and data=="" and self.interactive and getattr(sys.stdin,"isatty",lambda:False)());
+            result=self._run_command(command,stdin=data,stdout_is_tty=(self._stdout_is_tty and index==len(commands)-1),stdin_is_tty=stdin_is_tty); data=result.out; code=result.code;
             if result.err: stderr.append(result.err);
         return Execution(code,data,"".join(stderr));
 
-    def _run_command(self,tokens,stdin="",stdout_is_tty=None):
+    def _run_command(self,tokens,stdin="",stdout_is_tty=None,stdin_is_tty=False):
         if not tokens: return Execution();
         # redirects
         args=[]; in_data=stdin; out_file=None; append=False; err_file=None; err_append=False; merge_err=False; i=0;
+        command_stdin_is_tty=bool(stdin_is_tty);
         while i<len(tokens):
             tok=tokens[i];
             if tok in (">",">>","<","2>","2>>"):
                 if i+1>=len(tokens): return Execution(2,err="sumbash: redirection requires a file\n");
                 target=tokens[i+1];
                 if tok=="<":
+                    command_stdin_is_tty=False;
                     try: in_data=(Path(self.cwd)/target if not Path(target).is_absolute() else Path(target)).read_text(encoding="utf-8",errors="replace");
                     except OSError as exc: return Execution(1,err="sumbash: {}: {}\n".format(target,exc));
                 elif tok in (">",">>"): out_file=target; append=(tok==">>");
@@ -414,6 +422,7 @@ class ShellRuntime:
             if any(t in ("|",";","&&","||") for t in alias_tokens):
                 return self._run_tokens(alias_tokens+args,stdin=in_data);
             if alias_tokens: name=alias_tokens[0]; args=alias_tokens[1:]+args;
+        old_command_stdin_is_tty=self._command_stdin_is_tty; self._command_stdin_is_tty=command_stdin_is_tty;
         saved={};
         for key,value in assignments.items(): saved[key]=self.vars.get(key,None); self.vars[key]=value;
         old_command_tty=self._command_stdout_is_tty;
@@ -421,6 +430,7 @@ class ShellRuntime:
         try: result=self._dispatch(name,args,in_data,assignments);
         finally:
             self._command_stdout_is_tty=old_command_tty;
+            self._command_stdin_is_tty=old_command_stdin_is_tty;
             for key,old in saved.items():
                 if old is None: self.vars.pop(key,None);
                 else: self.vars[key]=old;
@@ -446,6 +456,19 @@ class ShellRuntime:
         path=self._which_external(name);
         if not path: return Execution(127,err="sumbash: {}: command not found\n".format(name));
         try:
+            # Full-screen/interactive programs (mc, vim, ssh, top, less, etc.) must
+            # own the terminal while they run. Capturing their stdio breaks curses/TTY
+            # negotiation and makes them appear to hang. Only inherit stdio for a
+            # foreground command that is not being piped or redirected by sumbash.
+            direct_stdio = bool(
+                not stdin and self._command_stdout_is_tty
+                and getattr(sys.stdin,"isatty",lambda:False)()
+                and getattr(sys.stdout,"isatty",lambda:False)()
+                and getattr(sys.stderr,"isatty",lambda:False)()
+            );
+            if direct_stdio:
+                cp=subprocess.run([path]+list(args),cwd=self.cwd,env=self.environment(temporary_env),check=False);
+                return Execution(cp.returncode);
             cp=subprocess.run([path]+list(args),input=stdin,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,cwd=self.cwd,env=self.environment(temporary_env),check=False);
             return Execution(cp.returncode,cp.stdout,cp.stderr);
         except OSError as exc: return Execution(126,err="sumbash: {}: {}\n".format(name,exc));
@@ -454,7 +477,7 @@ class ShellRuntime:
     def _builtin(self,name,args,stdin):
         if name=="true": return Execution(0);
         if name=="false": return Execution(1);
-        if name=="exit": raise ShellExit(int(args[0]) if args else self.last_status);
+        if name in ("exit","logout"): raise ShellExit(int(args[0]) if args else self.last_status);
         if name=="cd": return self._bi_cd(args);
         if name in ("export","global","readonly"): return self._bi_assign(name,args);
         if name=="unset":
@@ -472,7 +495,7 @@ class ShellRuntime:
         if name=="eval": return self.run_line(" ".join(args),capture=True,stdin=stdin);
         if name=="shopt": return self._bi_shopt(args);
         if name=="set": return self._bi_set(args);
-        if name=="history": return Execution(out="".join("{:5d}  {}\n".format(i+1,v) for i,v in enumerate(self.history)));
+        if name=="history": return self._bi_history(args);
         if name=="read": return self._bi_read(args,stdin);
         if name=="inkey": return self._bi_inkey(args);
         if name=="let":
@@ -589,13 +612,97 @@ class ShellRuntime:
                 self.shell_options["vi"]=value;
                 if value:
                     try:
-                        import readline; readline.parse_and_bind("set editing-mode vi");
+                        import readline; self._readline=readline; readline.parse_and_bind("set editing-mode vi");
                     except Exception: pass;
                 return Execution();
             return Execution(1,err="set: {}: invalid option name\n".format(name));
         if not args:
             return Execution(out="".join("{}={}\n".format(k,v) for k,v in sorted(self.vars.items())));
         return Execution(2,err="set: alpha supports set -o vi\n");
+
+    def _history_limit(self):
+        try: return max(0,int(self.get("HISTSIZE") or 1000));
+        except ValueError: return 1000;
+
+    def _history_file_limit(self):
+        try: return max(0,int(self.get("HISTFILESIZE") or 2000));
+        except ValueError: return 2000;
+
+    def _history_path(self):
+        raw=self.get("HISTFILE");
+        if raw: return str(Path(raw).expanduser());
+        home=self.get("HOME") or str(Path.home());
+        return str(Path(home)/".sumbash_history");
+
+    def _setup_readline(self):
+        if self._history_loaded: return;
+        self._history_loaded=True;
+        try:
+            import readline;
+        except Exception:
+            return;
+        self._readline=readline;
+        try:
+            readline.parse_and_bind("set editing-mode {}".format("vi" if self.shell_options.get("vi") else "emacs"));
+            readline.parse_and_bind(r'"\C-l": clear-screen');
+        except Exception: pass;
+        try:
+            readline.set_history_length(self._history_file_limit());
+        except Exception: pass;
+        self._history_file=self._history_path();
+        try:
+            readline.read_history_file(self._history_file);
+        except (FileNotFoundError,OSError): pass;
+        # Mirror loaded readline history so the `history` builtin sees it too.
+        try:
+            count=readline.get_current_history_length();
+            self.history=[readline.get_history_item(i) for i in range(1,count+1) if readline.get_history_item(i) is not None];
+        except Exception: pass;
+
+    def _record_history(self,line):
+        if not self.interactive or not line.strip(): return;
+        control=self.get("HISTCONTROL");
+        if ("ignorespace" in control or "ignoreboth" in control) and line.startswith(" "): return;
+        if ("ignoredups" in control or "ignoreboth" in control) and self.history and self.history[-1]==line: return;
+        self.history.append(line);
+        limit=self._history_limit();
+        if limit and len(self.history)>limit: self.history=self.history[-limit:];
+        if self._readline is not None:
+            try:
+                current=self._readline.get_current_history_length();
+                last=self._readline.get_history_item(current) if current else None;
+                if last!=line: self._readline.add_history(line);
+            except Exception: pass;
+
+    def _write_history(self):
+        if self._readline is None or not self._history_file: return;
+        try:
+            Path(self._history_file).expanduser().parent.mkdir(parents=True,exist_ok=True);
+            self._readline.set_history_length(self._history_file_limit());
+            if self.options.get("histappend") and Path(self._history_file).exists():
+                # Python readline can append only the lines added in this process,
+                # but write_history_file is deterministic across readline variants.
+                self._readline.write_history_file(self._history_file);
+            else:
+                self._readline.write_history_file(self._history_file);
+        except OSError: pass;
+
+    def _bi_history(self,args):
+        if args and args[0]=="-c":
+            self.history.clear();
+            if self._readline is not None:
+                try: self._readline.clear_history();
+                except Exception: pass;
+            return Execution();
+        if args and args[0] in ("-w","-a"):
+            self._write_history(); return Execution();
+        count=None;
+        if args:
+            try: count=max(0,int(args[-1]));
+            except ValueError: return Execution(2,err="history: numeric argument required\n");
+        rows=self.history[-count:] if count is not None else self.history;
+        offset=len(self.history)-len(rows);
+        return Execution(out="".join("{:5d}  {}\n".format(offset+i+1,v) for i,v in enumerate(rows)));
 
     def _bi_read(self,args,stdin):
         timeout=None; prompt=""; silent=False; nchars=None; names=[]; i=0;
@@ -686,13 +793,17 @@ class ShellRuntime:
         return Execution(result.code,"".join(out),"".join(err));
 
     def interactive_loop(self):
-        self.interactive=True;
-        while True:
-            try:
-                line=input(self.prompt());
-                result=self.run_line(line,capture=False);
-            except EOFError:
-                sys.stdout.write("\n"); return self.last_status;
-            except KeyboardInterrupt:
-                sys.stdout.write("\n"); self.last_status=130;
-            except ShellExit as exc: return exc.code;
+        self.interactive=True; self._setup_readline();
+        try:
+            while True:
+                try:
+                    line=input(self.prompt());
+                    self.run_line(line,capture=False);
+                except EOFError:
+                    # Ctrl-D on an empty interactive prompt is shell EOF: exit/logout.
+                    sys.stdout.write("\n"); return self.last_status;
+                except KeyboardInterrupt:
+                    sys.stdout.write("\n"); self.last_status=130;
+                except ShellExit as exc: return exc.code;
+        finally:
+            self._write_history();

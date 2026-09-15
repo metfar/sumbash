@@ -67,3 +67,37 @@ def test_ls_color_modes_and_pipeline_safety(tmp_path):
     shell._stdout_is_tty=True;
     piped=shell.run_line("ls | cat",capture=True);
     assert "\x1b[" not in piped.out;
+
+
+def test_ls_extended_sort_hidden_recursive_and_formats(tmp_path):
+    (tmp_path/"adir").mkdir();
+    (tmp_path/"adir"/"nested.txt").write_text("x",encoding="utf-8");
+    (tmp_path/"b.txt").write_text("123456",encoding="utf-8");
+    (tmp_path/"a.txt").write_text("1",encoding="utf-8");
+    (tmp_path/".hidden").write_text("h",encoding="utf-8");
+    shell=ShellRuntime(cwd=tmp_path);
+    by_size=run_applet("ls",["-S1"],runtime=shell);
+    assert by_size.code==0;
+    assert "b.txt" in by_size.out;
+    normal=run_applet("ls",["-1"],runtime=shell);
+    assert ".hidden" not in normal.out;
+    almost=run_applet("ls",["-A1"],runtime=shell);
+    assert ".hidden" in almost.out;
+    recursive=run_applet("ls",["-R1"],runtime=shell);
+    assert "nested.txt" in recursive.out;
+    grouped=run_applet("ls",["--group-directories-first","-1"],runtime=shell);
+    assert grouped.out.splitlines()[0].startswith("adir");
+
+
+def test_ls_long_human_indicators_and_help(tmp_path):
+    d=tmp_path/"dir"; d.mkdir();
+    f=tmp_path/"run.sh"; f.write_text("#!/bin/sh\n",encoding="utf-8"); f.chmod(0o755);
+    shell=ShellRuntime(cwd=tmp_path);
+    long=run_applet("ls",["-lhF"],runtime=shell);
+    assert long.code==0;
+    assert "dir/" in long.out;
+    assert "run.sh*" in long.out;
+    help_result=run_applet("ls",["--help"],runtime=shell);
+    assert "--group-directories-first" in help_result.out;
+    zero=run_applet("ls",["--zero"],runtime=shell);
+    assert "\0" in zero.out;
