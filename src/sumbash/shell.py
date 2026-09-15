@@ -9,12 +9,13 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a11.
+"""Small portable shell core for sumbash 0.1.0a14.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
 redirections, aliases, selected Bash-compatible builtins and external fallback.
-Compound grammar (if/for/while/functions/arrays) is scheduled for later alphas.
+This alpha adds indexed arrays and practical for/in loops for real SUM maintenance scripts.
+Broader compound grammar (if/while/functions/associative arrays) is scheduled for later alphas.
 """;
 
 from __future__ import annotations;
@@ -22,7 +23,9 @@ from __future__ import annotations;
 from dataclasses import dataclass;
 from datetime import datetime;
 import difflib;
+import fnmatch;
 import getpass;
+import glob;
 import io;
 import os;
 from pathlib import Path;
@@ -32,6 +35,7 @@ import socket;
 import subprocess;
 import sys;
 
+from . import __version__;
 from .applets import APPLETS, AppletResult, run_applet;
 from .arithmetic import SumArithmeticError, evaluate, format_number;
 from .completion import CompletionEngine, CompletionSpec, format_completion_spec, parse_completion_spec, spec_candidates;
@@ -42,15 +46,53 @@ _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S);
 _OPERATORS = ("2>&1", "2>>", "2>", "&&", "||", ">>", "|", ";", ">", "<");
 
 
+class ShellWord(str):
+    """A token plus the pathname-expansion pattern that survived quote removal.""";
+    def __new__(cls, value, glob_pattern=None):
+        obj=str.__new__(cls, value);
+        obj.glob_pattern=glob_pattern;
+        return obj;
+
+
 @dataclass
 class Execution:
     code: int = 0;
-    out: str = "";
+    out: object = "";
     err: str = "";
+
+
+def _stream_text(value):
+    """Decode captured external bytes only at a text boundary.""";
+    if isinstance(value,(bytes,bytearray)): return bytes(value).decode("utf-8",errors="replace");
+    return str(value);
+
+
+def _stream_bytes(value):
+    if isinstance(value,(bytes,bytearray)): return bytes(value);
+    return str(value).encode("utf-8");
+
+
+def _stream_join(values):
+    values=list(values);
+    if any(isinstance(v,(bytes,bytearray)) for v in values):
+        return b"".join(_stream_bytes(v) for v in values);
+    return "".join(str(v) for v in values);
 
 
 class ShellExit(Exception):
     def __init__(self, code=0): self.code=int(code);
+
+
+class ShellReturn(Exception):
+    def __init__(self, code=0): self.code=int(code);
+
+
+class ShellBreak(Exception):
+    pass;
+
+
+class ShellContinue(Exception):
+    pass;
 
 
 class ShellRuntime:
@@ -62,9 +104,24 @@ class ShellRuntime:
         # An explicit HISTCONTROL from the caller always wins.
         self.vars.setdefault("HISTCONTROL","ignoreboth");
         self.exported = set(self.env);
+        try:
+            _sum_shell_path=str(Path(sys.argv[0]).resolve()) if Path(sys.argv[0]).exists() else (shutil.which("sumbash") or str(argv0));
+        except Exception:
+            _sum_shell_path=shutil.which("sumbash") or str(argv0);
+        self.vars["SUM_SHELL"]=_sum_shell_path; self.vars["SUM_SHELL_VERSION"]=__version__;
+        self.env["SUM_SHELL"]=_sum_shell_path; self.env["SUM_SHELL_VERSION"]=__version__;
+        self.exported.update(("SUM_SHELL","SUM_SHELL_VERSION"));
         self.global_names = set();
         self.readonly = set();
         self.aliases = {};
+        self.arrays = {};
+        self.assoc_arrays = {};
+        self.functions = {};
+        self._function_depth = 0;
+        self._local_scopes = [];
+        self._loop_depth = 0;
+        self.errexit = False;
+        self.traps = {};
         self.options = {"cdspell": False, "histappend": False, "checkwinsize": True, "globstar": False};
         self.shell_options = {"vi": False};
         self.cwd = str(Path(cwd or os.getcwd()).resolve());
@@ -74,7 +131,16 @@ class ShellRuntime:
         self.last_status = 0;
         self.history = [];
         self.pid = os.getpid();
+        self.vars.setdefault("PPID",str(os.getppid()));
+        if hasattr(os,"getuid"): self.vars.setdefault("UID",str(os.getuid()));
+        if hasattr(os,"geteuid"): self.vars.setdefault("EUID",str(os.geteuid()));
+        self.vars.setdefault("HOSTNAME",socket.gethostname());
         self._source_depth = 0;
+        self._script_depth = 0;
+        self._exit_requested = None;
+        self._return_requested = None;
+        self._break_requested = False;
+        self._continue_requested = False;
         self._readline = None;
         self._history_loaded = False;
         self._history_file = None;
@@ -97,11 +163,16 @@ class ShellRuntime:
         if name == "-": return "i" if self.interactive else "";
         if name.isdigit():
             index=int(name)-1; return self.argv[index] if 0 <= index < len(self.argv) else "";
+        if name in self.arrays:
+            values=self.arrays.get(name,[]); return str(values[0]) if values else "";
+        if name in self.assoc_arrays:
+            values=self.assoc_arrays.get(name,{}); return str(next(iter(values.values()),""));
         return str(self.vars.get(name, ""));
 
     def set_var(self, name, value, export=None, global_scope=False):
         if name in self.readonly: raise ValueError("{}: readonly variable".format(name));
         self.vars[name] = str(value);
+        self.arrays.pop(name,None); self.assoc_arrays.pop(name,None);
         if global_scope: self.global_names.add(name);
         if export is True: self.exported.add(name);
         elif export is False: self.exported.discard(name);
@@ -109,7 +180,7 @@ class ShellRuntime:
 
     def unset(self, name):
         if name in self.readonly: raise ValueError("{}: readonly variable".format(name));
-        self.vars.pop(name,None); self.env.pop(name,None); self.exported.discard(name); self.global_names.discard(name);
+        self.vars.pop(name,None); self.arrays.pop(name,None); self.assoc_arrays.pop(name,None); self.env.pop(name,None); self.exported.discard(name); self.global_names.discard(name);
 
     def environment(self, overrides=None):
         env={name:str(self.vars.get(name,"")) for name in self.exported};
@@ -120,6 +191,7 @@ class ShellRuntime:
     def resolve_command(self, name, all_matches=False):
         matches=[];
         if name in self.aliases: matches.append(("alias", self.aliases[name]));
+        if name in self.functions: matches.append(("function", name));
         if name in self._builtin_names(): matches.append(("builtin", name));
         if name in APPLETS: matches.append(("applet", name));
         path = self._which_external(name);
@@ -133,10 +205,42 @@ class ShellRuntime:
         return shutil.which(name, path=self.vars.get("PATH", os.environ.get("PATH","")));
 
     def _builtin_names(self):
-        return {"cd","export","global","unset","readonly","set","shopt","alias","unalias","command","type","source",".","eval","read","inkey","history","complete","compgen","compopt","exit","logout","true","false","let"};
+        return {"cd","export","global","unset","readonly","set","shopt","alias","unalias","command","type","source",".","eval","read","inkey","history","complete","compgen","compopt","exit","logout","true","false","let","local","declare","return","break","continue","shift","trap","umask",":"};
 
     # ---------- expansion ----------
+    def _subscript_key(self, expr):
+        text=str(expr).strip();
+        if len(text)>=2 and text[0] in "\"'" and text[-1]==text[0]: text=text[1:-1];
+        return self.expand_text(text) if "$" in text or "`" in text else text;
+
+    @staticmethod
+    def _remove_parameter_pattern(value,pattern,prefix=False,longest=False):
+        value=str(value); pattern=str(pattern); matches=[];
+        if prefix:
+            for cut in range(0,len(value)+1):
+                if fnmatch.fnmatchcase(value[:cut],pattern): matches.append(cut);
+            if not matches: return value;
+            cut=max(matches) if longest else min(matches); return value[cut:];
+        for cut in range(0,len(value)+1):
+            if fnmatch.fnmatchcase(value[cut:],pattern): matches.append(cut);
+        if not matches: return value;
+        # suffix length is len(value)-cut: longest suffix => smallest cut.
+        cut=min(matches) if longest else max(matches); return value[:cut];
+
     def _expand_parameter(self, body):
+        m=re.match(r"^#([A-Za-z_][A-Za-z0-9_]*)\[(?:@|\*)\]$",body);
+        if m: return str(len(self.arrays.get(m.group(1),[])));
+        m=re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\[(-?\d+)\]$",body);
+        if m:
+            values=self.arrays.get(m.group(1),[]); index=int(m.group(2));
+            try: return str(values[index]);
+            except IndexError: return "";
+        m=re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\[(.+)\]$",body,re.S);
+        if m and m.group(1) in self.assoc_arrays:
+            key=self._subscript_key(m.group(2)); return str(self.assoc_arrays.get(m.group(1),{}).get(key,""));
+        m=re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\[(?:@|\*)\]$",body);
+        if m:
+            sep=(self.get("IFS") or " ")[0]; return sep.join(str(v) for v in self.arrays.get(m.group(1),[]));
         if body.startswith("#") and _NAME_RE.match(body[1:]): return str(len(self.get(body[1:])));
         # ${name:-word}, ${name:+word}, ${name:=word}
         m=re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(:-|:\+|:=)(.*)$",body,re.S);
@@ -148,6 +252,11 @@ class ShellRuntime:
                 if empty:
                     value=self.expand_text(word); self.set_var(name,value);
                 return value;
+        # POSIX/Bash prefix/suffix pattern removal: ${v#pat}, ${v##pat}, ${v%pat}, ${v%%pat}.
+        m=re.match(r"^([A-Za-z_][A-Za-z0-9_]*|[0-9]+)(##|#|%%|%)(.*)$",body,re.S);
+        if m:
+            name,op,pattern=m.groups(); value=self.get(name); pattern=self.expand_text(pattern);
+            return self._remove_parameter_pattern(value,pattern,prefix=op.startswith("#"),longest=len(op)==2);
         # replacement ${v//old/new} or ${v/old/new}
         m=re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(//|/)(.*?)/(.*)$",body,re.S);
         if m:
@@ -159,6 +268,13 @@ class ShellRuntime:
             name,off,length=m.groups(); value=self.get(name); start=int(off);
             return value[start:] if length is None else value[start:start+int(length)];
         return self.get(body);
+
+    @staticmethod
+    def _arithmetic_expr(expr):
+        text=str(expr);
+        text=re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",r"\1",text);
+        text=re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*)",r"\1",text);
+        return text;
 
     def expand_text(self, text):
         """Expand variables, arithmetic and command substitutions in one string.""";
@@ -174,12 +290,12 @@ class ShellRuntime:
                 old_tty=self._stdout_is_tty; self._stdout_is_tty=False;
                 try: result=self.run_line(text[i+1:j],capture=True);
                 finally: self._stdout_is_tty=old_tty;
-                out.append(result.out.rstrip("\n")); i=j+1; continue;
+                out.append(_stream_text(result.out).rstrip("\n")); i=j+1; continue;
             if ch!="$": out.append(ch); i+=1; continue;
             if text.startswith("$((",i):
                 end=self._balanced_arithmetic(text,i+3);
                 if end is None: out.append("$"); i+=1; continue;
-                expr=text[i+3:end];
+                expr=self._arithmetic_expr(text[i+3:end]);
                 try: value=evaluate(expr,self.vars);
                 except SumArithmeticError as exc: raise ValueError("arithmetic: {}".format(exc));
                 out.append(format_number(value)); i=end+2; continue;
@@ -189,7 +305,7 @@ class ShellRuntime:
                 old_tty=self._stdout_is_tty; self._stdout_is_tty=False;
                 try: result=self.run_line(text[i+2:end],capture=True);
                 finally: self._stdout_is_tty=old_tty;
-                out.append(result.out.rstrip("\n")); i=end+1; continue;
+                out.append(_stream_text(result.out).rstrip("\n")); i=end+1; continue;
             if i+1<len(text) and text[i+1]=="{":
                 end=text.find("}",i+2);
                 if end<0: out.append("$"); i+=1; continue;
@@ -233,20 +349,47 @@ class ShellRuntime:
         return None;
 
     def tokenize(self,line):
-        tokens=[]; buf=[]; quote=None; i=0; was_quoted=False;
+        tokens=[]; buf=[]; pattern=[]; quote=None; i=0; was_quoted=False; pathname_magic=False;
+        def append_literal(value,quoted=False):
+            nonlocal pathname_magic;
+            text=str(value); buf.append(text);
+            if quoted:
+                pattern.append(glob.escape(text));
+            else:
+                pattern.append(text);
+                if glob.has_magic(text): pathname_magic=True;
         def flush():
-            nonlocal buf,was_quoted;
-            if buf or was_quoted: tokens.append("".join(buf)); buf=[]; was_quoted=False;
+            nonlocal buf,pattern,was_quoted,pathname_magic;
+            if buf or was_quoted:
+                value="".join(buf); glob_pattern="".join(pattern) if pathname_magic else None;
+                tokens.append(ShellWord(value,glob_pattern));
+                buf=[]; pattern=[]; was_quoted=False; pathname_magic=False;
+        def append_expansion(value,quoted=False):
+            """Apply default/IFS field splitting only to unquoted expansion results.""";
+            if quoted:
+                append_literal(value,quoted=True); return;
+            # Assignment values are an expansion context of their own: Bash does not
+            # field-split or pathname-expand A=$value.
+            prefix="".join(buf);
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=$",prefix):
+                append_literal(value,quoted=True); return;
+            text=str(value); ifs=self.get("IFS") or " \t\n";
+            # Practical POSIX/Bash field splitting for maintenance scripts.
+            rx="[{}]+".format(re.escape(ifs)); fields=[x for x in re.split(rx,text) if x!=""];
+            if not fields: return;
+            append_literal(fields[0],quoted=False);
+            for field in fields[1:]:
+                flush(); append_literal(field,quoted=False);
         while i<len(line):
             c=line[i];
             if quote=="'":
                 if c=="'": quote=None; was_quoted=True;
-                else: buf.append(c);
+                else: append_literal(c,quoted=True);
                 i+=1; continue;
             if quote=='"':
                 if c=='"': quote=None; was_quoted=True; i+=1; continue;
-                if c=="\\" and i+1<len(line) and line[i+1] in '$`"\\': buf.append(line[i+1]); i+=2; continue;
-                if c in ("$","`"): 
+                if c=="\\" and i+1<len(line) and line[i+1] in '$`"\\': append_literal(line[i+1],quoted=True); i+=2; continue;
+                if c in ("$","`"):
                     # expand the longest substitution beginning here by delegating.
                     end=i+1;
                     if line.startswith("$((",i):
@@ -259,12 +402,12 @@ class ShellRuntime:
                         pos=line.find("`",i+1); end=(pos+1 if pos>=0 else i+1);
                     else:
                         m=re.match(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?$#@*\-])",line[i:]); end=i+len(m.group(0)) if m else i+1;
-                    buf.append(self.expand_text(line[i:end])); i=end; continue;
-                buf.append(c); i+=1; continue;
+                    append_literal(self.expand_text(line[i:end]),quoted=True); i=end; continue;
+                append_literal(c,quoted=True); i+=1; continue;
             # unquoted
             if c=="#" and not buf and (i==0 or line[i-1].isspace()): flush(); break;
             if c in "'\"": quote=c; was_quoted=True; i+=1; continue;
-            if c=="\\" and i+1<len(line): buf.append(line[i+1]); i+=2; continue;
+            if c=="\\" and i+1<len(line): append_literal(line[i+1],quoted=True); i+=2; continue;
             if c.isspace(): flush(); i+=1; continue;
             op=None;
             for candidate in _OPERATORS:
@@ -283,10 +426,81 @@ class ShellRuntime:
                     pos=line.find("`",i+1); end=(pos+1 if pos>=0 else i+1);
                 else:
                     m=re.match(r"\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?$#@*\-])",line[i:]); end=i+len(m.group(0)) if m else i+1;
-                buf.append(self.expand_text(line[i:end])); i=end; continue;
-            buf.append(c); i+=1;
+                append_expansion(self.expand_text(line[i:end]),quoted=False); i=end; continue;
+            append_literal(c,quoted=False); i+=1;
         if quote: raise ValueError("unterminated quote");
         flush(); return tokens;
+
+    def _pathname_expand_word(self, word):
+        """Return shell pathname expansion for one quote-aware word.""";
+        pattern=getattr(word,"glob_pattern",None);
+        if not pattern: return [str(word)];
+        try:
+            matches=glob.glob(pattern,root_dir=self.cwd,recursive=bool(self.options.get("globstar")));
+        except (OSError,re.error):
+            matches=[];
+        if not matches: return [str(word)];
+        return sorted(matches);
+
+    def _pathname_expand_args(self,args):
+        """Expand glob patterns after quote removal, except assignment prefixes.""";
+        expanded=[]; command_seen=False;
+        for word in args:
+            value=str(word);
+            if not command_seen and _ASSIGN_RE.match(value):
+                expanded.append(value); continue;
+            command_seen=True;
+            expanded.extend(self._pathname_expand_word(word));
+        return expanded;
+
+    def _try_array_assignment(self,line):
+        text=str(line).strip();
+        if text.endswith(";"): text=text[:-1].rstrip();
+        m=re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=\((.*)\)$",text,re.S);
+        if not m: return None;
+        name,inner=m.groups();
+        tokens=self.tokenize(inner); values=self._pathname_expand_args(tokens);
+        self.arrays[name]=[str(v) for v in values]; self.vars.pop(name,None);
+        return Execution();
+
+    def _try_assoc_assignment(self,line):
+        text=str(line).strip();
+        if text.endswith(";"): text=text[:-1].rstrip();
+        m=re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\[([^]]+)\]=(.*)$",text,re.S);
+        if not m: return None;
+        name,key_expr,value_expr=m.groups();
+        if name not in self.assoc_arrays: return None;
+        key=self._subscript_key(key_expr);
+        value_expr=value_expr.strip();
+        if len(value_expr)>=2 and value_expr[0] in "\"'" and value_expr[-1]==value_expr[0]:
+            quote=value_expr[0]; inner=value_expr[1:-1]; value=inner if quote=="'" else self.expand_text(inner);
+        else:
+            tokens=self.tokenize(value_expr); value=" ".join(str(x) for x in tokens);
+        self.assoc_arrays.setdefault(name,{})[str(key)]=str(value);
+        return Execution();
+
+    def _for_words(self,expr):
+        text=str(expr).strip();
+        m=re.fullmatch(r'["\']?\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}["\']?',text);
+        if m: return list(self.arrays.get(m.group(1),[]));
+        tokens=self.tokenize(text); return self._pathname_expand_args(tokens);
+
+    def _run_for(self,name,expr,body_lines):
+        out=[]; err=[]; result=Execution(); self._loop_depth+=1;
+        try:
+            for value in self._for_words(expr):
+                self.set_var(name,value); result=self._run_block(body_lines); out.append(result.out); err.append(result.err);
+                if self._break_requested: self._break_requested=False; break;
+                if self._continue_requested: self._continue_requested=False; continue;
+                if self._return_requested is not None or self._exit_requested is not None: break;
+        finally: self._loop_depth-=1;
+        return Execution(result.code,_stream_join(out),"".join(err));
+
+    def _try_inline_for(self,line):
+        text=str(line).strip();
+        m=re.match(r"^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.*?);\s*do\s+(.*?)\s*;\s*done\s*;?$",text,re.S);
+        if not m: return None;
+        name,expr,body=m.groups(); return self._run_for(name,expr,[body]);
 
     # ---------- execution ----------
     def run_line(self,line,capture=False,stdin="",record_history=False):
@@ -296,11 +510,18 @@ class ShellRuntime:
         # engine.  Prompt substitutions, sourced/script lines, eval internals and
         # command substitutions call run_line() too, but must never become history.
         if record_history: self._record_history(line);
-        try: result=self._run_raw_sequence(line,stdin=stdin);
+        try:
+            result=self._try_assoc_assignment(line);
+            if result is None: result=self._try_array_assignment(line);
+            if result is None: result=self._try_inline_for(line);
+            if result is None: result=self._run_raw_sequence(line,stdin=stdin);
         except ValueError as exc: return Execution(2,err="sumbash: {}\n".format(exc));
         self.last_status=result.code;
         if not capture:
-            if result.out: sys.stdout.write(result.out); sys.stdout.flush();
+            if result.out:
+                if isinstance(result.out,(bytes,bytearray)):
+                    sys.stdout.buffer.write(bytes(result.out)); sys.stdout.buffer.flush();
+                else: sys.stdout.write(str(result.out)); sys.stdout.flush();
             if result.err: sys.stderr.write(result.err); sys.stderr.flush();
         return result;
 
@@ -337,7 +558,7 @@ class ShellRuntime:
         for index,piece in enumerate(pieces):
             if not piece.strip(): continue;
             result=self._run_raw_conditional(piece,stdin=stdin if index==0 else ""); code=result.code; out.append(result.out); err.append(result.err);
-        return Execution(code,"".join(out),"".join(err));
+        return Execution(code,_stream_join(out),"".join(err));
 
     def _run_raw_conditional(self,line,stdin=""):
         pieces,ops=self._split_raw(line,("&&","||")); out=[]; err=[];
@@ -346,9 +567,12 @@ class ShellRuntime:
             if op=="&&" and result.code!=0: continue;
             if op=="||" and result.code==0: continue;
             result=self._run_raw_pipeline(piece,stdin=""); out.append(result.out); err.append(result.err);
-        return Execution(result.code,"".join(out),"".join(err));
+        return Execution(result.code,_stream_join(out),"".join(err));
 
     def _run_raw_pipeline(self,line,stdin=""):
+        stripped=str(line).lstrip();
+        if stripped.startswith("! "):
+            inner=stripped[2:].lstrip(); result=self._run_raw_pipeline(inner,stdin=stdin); result.code=0 if result.code else 1; return result;
         pieces,unused=self._split_raw(line,("|",)); data=stdin; err=[]; code=0;
         for index,piece in enumerate(pieces):
             tokens=self.tokenize(piece);
@@ -406,7 +630,9 @@ class ShellRuntime:
             tok=tokens[i];
             if tok in (">",">>","<","2>","2>>"):
                 if i+1>=len(tokens): return Execution(2,err="sumbash: redirection requires a file\n");
-                target=tokens[i+1];
+                targets=self._pathname_expand_word(tokens[i+1]);
+                if len(targets)!=1: return Execution(1,err="sumbash: {}: ambiguous redirect\n".format(tokens[i+1]));
+                target=targets[0];
                 if tok=="<":
                     command_stdin_is_tty=False;
                     try: in_data=(Path(self.cwd)/target if not Path(target).is_absolute() else Path(target)).read_text(encoding="utf-8",errors="replace");
@@ -417,6 +643,7 @@ class ShellRuntime:
             if tok=="2>&1": merge_err=True; i+=1; continue;
             args.append(tok); i+=1;
         if not args: return Execution();
+        args=self._pathname_expand_args(args);
         # assignments at command prefix
         assignments={};
         while args:
@@ -446,12 +673,18 @@ class ShellRuntime:
             for key,old in saved.items():
                 if old is None: self.vars.pop(key,None);
                 else: self.vars[key]=old;
-        if merge_err and result.err: result.out += result.err; result.err="";
+        if merge_err and result.err:
+            if isinstance(result.out,(bytes,bytearray)): result.out=bytes(result.out)+result.err.encode("utf-8");
+            else: result.out=str(result.out)+result.err;
+            result.err="";
         if out_file:
             p=Path(out_file); p=p if p.is_absolute() else Path(self.cwd)/p;
             try:
-                with open(p,"a" if append else "w",encoding="utf-8") as stream: stream.write(result.out);
-                result.out="";
+                if isinstance(result.out,(bytes,bytearray)):
+                    with open(p,"ab" if append else "wb") as stream: stream.write(bytes(result.out));
+                else:
+                    with open(p,"a" if append else "w",encoding="utf-8") as stream: stream.write(str(result.out));
+                result.out=b"" if isinstance(result.out,(bytes,bytearray)) else "";
             except OSError as exc: result.code=1; result.err += "sumbash: {}: {}\n".format(out_file,exc);
         if err_file:
             p=Path(err_file); p=p if p.is_absolute() else Path(self.cwd)/p;
@@ -462,8 +695,9 @@ class ShellRuntime:
         return result;
 
     def _dispatch(self,name,args,stdin,temporary_env=None):
-        if name in self._builtin_names(): return self._builtin(name,args,stdin);
-        applet=run_applet(name,args,stdin=stdin,runtime=self);
+        if name in self.functions: return self._call_function(name,args,stdin);
+        if name in self._builtin_names(): return self._builtin(name,args,_stream_text(stdin));
+        applet=run_applet(name,args,stdin=_stream_text(stdin),runtime=self);
         if applet is not None: return Execution(applet.code,applet.out,applet.err);
         path=self._which_external(name);
         if not path: return Execution(127,err="sumbash: {}: command not found\n".format(name));
@@ -481,17 +715,66 @@ class ShellRuntime:
             if direct_stdio:
                 cp=subprocess.run([path]+list(args),cwd=self.cwd,env=self.environment(temporary_env),check=False);
                 return Execution(cp.returncode);
-            cp=subprocess.run([path]+list(args),input=stdin,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,cwd=self.cwd,env=self.environment(temporary_env),check=False);
-            return Execution(cp.returncode,cp.stdout,cp.stderr);
+            cp=subprocess.run([path]+list(args),input=_stream_bytes(stdin) if stdin not in ("",b"") else None,text=False,stdout=subprocess.PIPE,stderr=subprocess.PIPE,cwd=self.cwd,env=self.environment(temporary_env),check=False);
+            return Execution(cp.returncode,cp.stdout,cp.stderr.decode("utf-8",errors="replace"));
         except OSError as exc: return Execution(126,err="sumbash: {}: {}\n".format(name,exc));
+
+    def _call_function(self,name,args,stdin=""):
+        body=list(self.functions.get(name,[])); old_argv=self.argv; old_return=self._return_requested; self.argv=list(args); self._function_depth+=1; self._local_scopes.append({}); self._return_requested=None;
+        try:
+            result=self._run_block(body,stdin=stdin);
+            if self._return_requested is not None: result.code=int(self._return_requested);
+        finally:
+            scope=self._local_scopes.pop();
+            for var,state in reversed(list(scope.items())):
+                kind,value,exported=state;
+                self.vars.pop(var,None); self.arrays.pop(var,None); self.assoc_arrays.pop(var,None); self.env.pop(var,None); self.exported.discard(var);
+                if kind=="scalar": self.vars[var]=value;
+                elif kind=="array": self.arrays[var]=list(value);
+                elif kind=="assoc": self.assoc_arrays[var]=dict(value);
+                if exported:
+                    self.exported.add(var); self.env[var]=self.get(var);
+            self._function_depth-=1; self.argv=old_argv; self._return_requested=old_return;
+        return result;
+
+    def _remember_local(self,name):
+        if not self._local_scopes: return;
+        scope=self._local_scopes[-1];
+        if name in scope: return;
+        if name in self.arrays: scope[name]=("array",list(self.arrays[name]),name in self.exported);
+        elif name in self.assoc_arrays: scope[name]=("assoc",dict(self.assoc_arrays[name]),name in self.exported);
+        elif name in self.vars: scope[name]=("scalar",self.vars[name],name in self.exported);
+        else: scope[name]=("unset",None,False);
 
     # ---------- builtins ----------
     def _builtin(self,name,args,stdin):
-        if name=="true": return Execution(0);
+        if name in ("true",":"): return Execution(0);
         if name=="false": return Execution(1);
-        if name in ("exit","logout"): raise ShellExit(int(args[0]) if args else self.last_status);
+        if name=="return":
+            if not self._function_depth and not self._source_depth: return Execution(1,err="return: can only return from a function or sourced script\n");
+            code=int(args[0]) if args else self.last_status; self._return_requested=code; return Execution(code);
+        if name=="break":
+            if not self._loop_depth: return Execution(1,err="break: only meaningful in a loop\n");
+            self._break_requested=True; return Execution();
+        if name=="continue":
+            if not self._loop_depth: return Execution(1,err="continue: only meaningful in a loop\n");
+            self._continue_requested=True; return Execution();
+        if name in ("exit","logout"):
+            code=int(args[0]) if args else self.last_status;
+            if self._script_depth>0 or self._source_depth>0:
+                self._exit_requested=code; return Execution(code);
+            raise ShellExit(code);
         if name=="cd": return self._bi_cd(args);
+        if name=="shift":
+            try: count=int(args[0]) if args else 1;
+            except ValueError: return Execution(1,err="shift: numeric argument required\n");
+            if count<0 or count>len(self.argv): return Execution(1,err="shift: shift count out of range\n");
+            self.argv=self.argv[count:]; return Execution();
+        if name=="trap": return self._bi_trap(args);
+        if name=="umask": return self._bi_umask(args);
         if name in ("export","global","readonly"): return self._bi_assign(name,args);
+        if name=="local": return self._bi_local(args);
+        if name=="declare": return self._bi_declare(args);
         if name=="unset":
             try:
                 for item in args: self.unset(item);
@@ -548,6 +831,56 @@ class ShellRuntime:
             return Execution();
         except ValueError as exc: return Execution(1,err="{}: {}\n".format(mode,exc));
 
+    def _bi_local(self,args):
+        if not self._function_depth: return Execution(1,err="local: can only be used in a function\n");
+        for item in args:
+            if item in ("-a","-A"): continue;
+            m=_ASSIGN_RE.match(item); name=m.group(1) if m else item;
+            if not _NAME_RE.match(name): return Execution(1,err="local: invalid variable name: {}\n".format(name));
+            self._remember_local(name);
+            if m: self.set_var(name,m.group(2));
+            elif name not in self.vars and name not in self.arrays and name not in self.assoc_arrays: self.set_var(name,"");
+        return Execution();
+
+    def _bi_declare(self,args):
+        assoc=False; indexed=False; export=False; names=[];
+        for item in args:
+            if item=="-A": assoc=True; continue;
+            if item=="-a": indexed=True; continue;
+            if item=="-x": export=True; continue;
+            names.append(item);
+        if not names: return Execution();
+        for item in names:
+            m=_ASSIGN_RE.match(item); name=m.group(1) if m else item; value=m.group(2) if m else None;
+            if not _NAME_RE.match(name): return Execution(1,err="declare: invalid variable name: {}\n".format(name));
+            if self._function_depth: self._remember_local(name);
+            if assoc:
+                self.vars.pop(name,None); self.arrays.pop(name,None); self.assoc_arrays.setdefault(name,{});
+            elif indexed:
+                self.vars.pop(name,None); self.assoc_arrays.pop(name,None); self.arrays.setdefault(name,[]);
+            elif value is not None: self.set_var(name,value,export=export);
+            elif name not in self.vars: self.set_var(name,"",export=export);
+            if export: self.exported.add(name); self.env[name]=self.get(name);
+        return Execution();
+
+    def _bi_trap(self,args):
+        if not args:
+            return Execution(out="".join("trap -- '{}' {}\n".format(cmd.replace("'","'\\''"),sig) for sig,cmd in sorted(self.traps.items())));
+        if args[0]=="-":
+            for sig in args[1:]: self.traps.pop(str(sig),None);
+            return Execution();
+        if len(args)<2: return Execution(2,err="trap: usage: trap command signal...\n");
+        command=args[0];
+        for sig in args[1:]: self.traps[str(sig)]=command;
+        return Execution();
+
+    def _bi_umask(self,args):
+        try:
+            if not args:
+                current=os.umask(0); os.umask(current); return Execution(out="{:04o}\n".format(current));
+            value=int(args[0],8); os.umask(value); return Execution();
+        except (ValueError,OSError): return Execution(1,err="umask: invalid mask\n");
+
     def _bi_alias(self,args):
         if not args:
             return Execution(out="".join("alias {}='{}'\n".format(k,v.replace("'","'\\''")) for k,v in sorted(self.aliases.items())));
@@ -569,6 +902,7 @@ class ShellRuntime:
                 kind,value=found;
                 if verbose:
                     if kind=="alias": out.append("{} is aliased to `{}`\n".format(name,value));
+                    elif kind=="function": out.append("{} is a shell function\n".format(name));
                     elif kind=="builtin": out.append("{} is a shell builtin\n".format(name));
                     elif kind=="applet": out.append("{} is a SUM applet\n".format(name));
                     else: out.append("{} is {}\n".format(name,value));
@@ -586,6 +920,7 @@ class ShellRuntime:
             if not all_matches: matches=[matches];
             for kind,value in matches:
                 if kind=="alias": out.append("{} is aliased to `{}`\n".format(name,value));
+                elif kind=="function": out.append("{} is a shell function\n".format(name));
                 elif kind=="builtin": out.append("{} is a shell builtin\n".format(name));
                 elif kind=="applet": out.append("{} is a SUM applet\n".format(name));
                 else: out.append("{} is {}\n".format(name,value));
@@ -594,14 +929,15 @@ class ShellRuntime:
     def _bi_source(self,args):
         if not args: return Execution(2,err="source: filename required\n");
         p=Path(args[0]).expanduser(); p=p if p.is_absolute() else Path(self.cwd)/p;
-        try: lines=p.read_text(encoding="utf-8",errors="replace").splitlines();
+        try: text=p.read_text(encoding="utf-8",errors="replace");
         except OSError as exc: return Execution(1,err="source: {}: {}\n".format(args[0],exc));
-        old_argv=self.argv; self.argv=args[1:]; self._source_depth+=1; result=Execution(); out=[]; err=[];
-        try:
-            for line in lines:
-                result=self.run_line(line,capture=True); out.append(result.out); err.append(result.err);
-        finally: self._source_depth-=1; self.argv=old_argv;
-        return Execution(result.code,"".join(out),"".join(err));
+        old_argv=self.argv;
+        if len(args)>1: self.argv=args[1:];
+        self._source_depth+=1;
+        try: return self._run_block(self._logical_lines(text));
+        finally:
+            self._source_depth-=1;
+            if len(args)>1: self.argv=old_argv;
 
     def _bi_shopt(self,args):
         if not args:
@@ -621,6 +957,10 @@ class ShellRuntime:
         return Execution();
 
     def _bi_set(self,args):
+        if len(args)==1 and args[0] in ("-e","+e","-u","+u"):
+            if args[0] in ("-e","+e"): self.errexit=(args[0]=="-e");
+            else: self.shell_options["nounset"]=(args[0]=="-u");
+            return Execution();
         if len(args)>=2 and args[0] in ("-o","+o"):
             name=args[1]; value=args[0]=="-o";
             if name=="vi":
@@ -633,7 +973,11 @@ class ShellRuntime:
             return Execution(1,err="set: {}: invalid option name\n".format(name));
         if not args:
             return Execution(out="".join("{}={}\n".format(k,v) for k,v in sorted(self.vars.items())));
-        return Execution(2,err="set: alpha supports set -o vi\n");
+        if args and args[0]=="--": self.argv=list(args[1:]); return Execution();
+        if args and not args[0].startswith(("-","+")): self.argv=list(args); return Execution();
+        if len(args)==1 and args[0] in ("-x","+x"):
+            self.shell_options["xtrace"]=(args[0]=="-x"); return Execution();
+        return Execution(2,err="set: unsupported option\n");
 
     def _history_limit(self):
         try: return max(0,int(self.get("HISTSIZE") or 1000));
@@ -835,6 +1179,251 @@ class ShellRuntime:
             try: return input();
             except EOFError: return None;
 
+    # ---------- compound script grammar ----------
+    @staticmethod
+    def _logical_lines(text):
+        logical=[]; pending="";
+        for raw in str(text).splitlines():
+            if pending: raw=pending+raw.lstrip(); pending="";
+            stripped=raw.rstrip();
+            if stripped.endswith("\\"):
+                pending=stripped[:-1]+" "; continue;
+            if stripped.endswith("&&") or stripped.endswith("||"):
+                pending=stripped+" "; continue;
+            logical.append(raw);
+        if pending: logical.append(pending);
+        combined=[]; i=0;
+        while i<len(logical):
+            cur=logical[i]; st=cur.strip();
+            if i+1<len(logical) and logical[i+1].strip() in ("then","then;","do","do;"):
+                nxt=logical[i+1].strip().rstrip(";");
+                if (nxt=="then" and re.match(r"^(?:if|elif)\b",st)) or (nxt=="do" and re.match(r"^(?:while|until)\b",st)):
+                    cur=cur.rstrip()+"; "+nxt; i+=1;
+            combined.append(cur); i+=1;
+        return combined;
+
+    @staticmethod
+    def _control_text(text):
+        raw=str(text); quote=None; i=0;
+        while i<len(raw):
+            c=raw[i];
+            if quote:
+                if c==quote and (i==0 or raw[i-1]!="\\"): quote=None;
+            else:
+                if c in "\"'": quote=c;
+                elif c=="#" and (i==0 or raw[i-1].isspace()): return raw[:i].rstrip();
+            i+=1;
+        return raw;
+
+    @staticmethod
+    def _strip_semi(text):
+        value=str(text).strip();
+        while value.endswith(";"): value=value[:-1].rstrip();
+        return value;
+
+    def _collect_braced(self,lines,start):
+        body=[]; depth=1; i=start;
+        while i<len(lines):
+            raw=lines[i]; st=self._control_text(raw).strip();
+            if st=="{": depth+=1; body.append(raw); i+=1; continue;
+            if st.startswith("}"):
+                depth-=1;
+                if depth==0: return body,i,st[1:].strip();
+                body.append(raw); i+=1; continue;
+            body.append(raw); i+=1;
+        raise ValueError("unterminated braced block");
+
+    def _collect_loop_body(self,lines,start):
+        body=[]; depth=1; i=start;
+        while i<len(lines):
+            raw=lines[i]; st=self._control_text(raw).strip();
+            if re.match(r"^(?:for\b.*;\s*do|while\b.*;\s*do|until\b.*;\s*do)",st): depth+=1;
+            if st in ("done","done;"):
+                depth-=1;
+                if depth==0: return body,i;
+            body.append(raw); i+=1;
+        raise ValueError("unterminated loop");
+
+    def _collect_if(self,lines,start,first_cond):
+        branches=[]; current=[]; cond=first_cond; else_body=None; depth=1; i=start;
+        while i<len(lines):
+            raw=lines[i]; st=self._control_text(raw).strip();
+            if re.match(r"^if\b.*;\s*then\s*;?$",st): depth+=1; current.append(raw); i+=1; continue;
+            if st in ("fi","fi;"):
+                depth-=1;
+                if depth==0:
+                    if else_body is not None: else_body.extend(current);
+                    else: branches.append((cond,current));
+                    return branches,else_body,i;
+                current.append(raw); i+=1; continue;
+            if depth==1:
+                m=re.match(r"^elif\s+(.*?);\s*then\s*;?$",st,re.S);
+                if m:
+                    if else_body is not None: raise ValueError("elif after else");
+                    branches.append((cond,current)); cond=m.group(1); current=[]; i+=1; continue;
+                if st in ("else","else;"):
+                    branches.append((cond,current)); cond=None; current=[]; else_body=[]; i+=1; continue;
+            current.append(raw); i+=1;
+        raise ValueError("unterminated if");
+
+    def _collect_case(self,lines,start):
+        clauses=[]; pattern=None; body=[]; depth=1; i=start;
+        while i<len(lines):
+            raw=lines[i]; st=self._control_text(raw).strip();
+            if re.match(r"^case\b.*\bin\s*;?$",st):
+                depth+=1;
+                if pattern is not None: body.append(raw);
+                i+=1; continue;
+            if st in ("esac","esac;"):
+                depth-=1;
+                if depth==0:
+                    if pattern is not None: clauses.append((pattern,body));
+                    return clauses,i;
+                if pattern is not None: body.append(raw);
+                i+=1; continue;
+            if depth==1 and pattern is None:
+                m=re.match(r"^(.*?)\)\s*(.*)$",st,re.S);
+                if m:
+                    pattern=m.group(1).strip(); tail=m.group(2).strip(); body=[];
+                    if tail:
+                        if tail.endswith(";;"):
+                            tail=tail[:-2].rstrip();
+                            if tail: body.append(tail);
+                            clauses.append((pattern,body)); pattern=None; body=[];
+                        else: body.append(tail);
+                    i+=1; continue;
+            if depth==1 and pattern is not None and ";;" in st:
+                prefix=raw.rsplit(";;",1)[0].rstrip();
+                if prefix.strip(): body.append(prefix);
+                clauses.append((pattern,body)); pattern=None; body=[]; i+=1; continue;
+            if pattern is not None: body.append(raw);
+            i+=1;
+        raise ValueError("unterminated case");
+
+    def _apply_block_redirect(self,result,suffix):
+        tail=self._strip_semi(suffix);
+        if not tail: return result;
+        m=re.match(r"^(>>|>)\s*(.+)$",tail,re.S);
+        if not m: return Execution(2,result.out,result.err+"sumbash: unsupported group suffix: {}\n".format(suffix));
+        op,target_expr=m.groups(); tokens=self.tokenize(target_expr);
+        if len(tokens)!=1: return Execution(1,result.out,result.err+"sumbash: ambiguous redirect\n");
+        target=str(tokens[0]); p=Path(target); p=p if p.is_absolute() else Path(self.cwd)/p;
+        try:
+            if isinstance(result.out,(bytes,bytearray)):
+                with open(p,"ab" if op==">>" else "wb") as stream: stream.write(bytes(result.out));
+                out=b"";
+            else:
+                with open(p,"a" if op==">>" else "w",encoding="utf-8") as stream: stream.write(str(result.out));
+                out="";
+            return Execution(result.code,out,result.err);
+        except OSError as exc: return Execution(1,result.out,result.err+"sumbash: {}: {}\n".format(target,exc));
+
+    def _execute_heredoc(self,lines,index,raw):
+        m=re.search(r"<<(-)?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2",raw);
+        if not m: return None;
+        strip_tabs=bool(m.group(1)); quoted=bool(m.group(2)); tag=m.group(3); data=[]; j=index+1;
+        while j<len(lines):
+            candidate=lines[j]; check=candidate.lstrip("\t") if strip_tabs else candidate;
+            if check==tag: break;
+            data.append(candidate.lstrip("\t") if strip_tabs else candidate); j+=1;
+        if j>=len(lines): raise ValueError("unterminated here-document ({})".format(tag));
+        command=(raw[:m.start()]+raw[m.end():]).strip(); payload="\n".join(data)+"\n";
+        if not quoted: payload=self.expand_text(payload);
+        return self.run_line(command,capture=True,stdin=payload),j;
+
+    def _run_if_construct(self,branches,else_body):
+        out=[]; err=[]; result=Execution(1);
+        for cond,body in branches:
+            test=self.run_line(cond,capture=True); out.append(test.out); err.append(test.err);
+            if test.code==0:
+                result=self._run_block(body); out.append(result.out); err.append(result.err); return Execution(result.code,_stream_join(out),"".join(err));
+        if else_body is not None:
+            result=self._run_block(else_body); out.append(result.out); err.append(result.err);
+        return Execution(result.code,_stream_join(out),"".join(err));
+
+    def _run_while(self,cond,body,until=False):
+        out=[]; err=[]; result=Execution(); self._loop_depth+=1; iterations=0;
+        try:
+            while True:
+                iterations+=1;
+                if iterations>100000: return Execution(2,_stream_join(out),"".join(err)+"sumbash: loop iteration limit exceeded\n");
+                test=self.run_line(cond,capture=True); out.append(test.out); err.append(test.err); ok=(test.code==0);
+                if until: ok=not ok;
+                if not ok: result=test; break;
+                result=self._run_block(body); out.append(result.out); err.append(result.err);
+                if self._break_requested: self._break_requested=False; result=Execution(); break;
+                if self._continue_requested: self._continue_requested=False; continue;
+                if self._return_requested is not None or self._exit_requested is not None: break;
+        finally: self._loop_depth-=1;
+        return Execution(result.code,_stream_join(out),"".join(err));
+
+    def _run_case_construct(self,word_expr,clauses):
+        tokens=self.tokenize(word_expr); word=str(tokens[0]) if tokens else "";
+        for pattern_expr,body in clauses:
+            for pattern in pattern_expr.split("|"):
+                pat=pattern.strip();
+                if len(pat)>=2 and pat[0] in "\"'" and pat[-1]==pat[0]: pat=pat[1:-1];
+                pat=self.expand_text(pat);
+                if fnmatch.fnmatchcase(word,pat): return self._run_block(body);
+        return Execution();
+
+    def _run_block(self,lines,stdin=""):
+        out=[]; err=[]; result=Execution(); i=0; first_stdin=stdin;
+        while i<len(lines):
+            if self._exit_requested is not None or self._return_requested is not None or self._break_requested or self._continue_requested: break;
+            raw=lines[i]; st=self._control_text(raw).strip();
+            if not st or st.startswith("#!") or st.startswith("#"): i+=1; continue;
+
+            # heredoc command is consumed together with its body before normal tokenization.
+            hd=self._execute_heredoc(lines,i,raw);
+            if hd is not None:
+                result,i=hd; out.append(result.out); err.append(result.err); i+=1; first_stdin=""; continue;
+
+            # inline function NAME() { command; ...; }
+            fim=re.match(r"^(?:function\s+)?([A-Za-z_][A-Za-z0-9_-]*)\s*\(\s*\)\s*\{\s*(.*?)\s*;?\s*\}\s*;?$",st,re.S);
+            if fim:
+                self.functions[fim.group(1)]=[fim.group(2)] if fim.group(2).strip() else []; i+=1; continue;
+
+            # function NAME() { ... } and NAME() { ... }
+            fm=re.match(r"^(?:function\s+)?([A-Za-z_][A-Za-z0-9_-]*)\s*\(\s*\)\s*(\{)?\s*;?$",st);
+            if fm:
+                name=fm.group(1); open_here=bool(fm.group(2));
+                open_index=i if open_here else i+1;
+                if open_index>=len(lines) or (not open_here and lines[open_index].strip()!="{"): raise ValueError("function {} missing {{".format(name));
+                body,end,unused_suffix=self._collect_braced(lines,open_index+1); self.functions[name]=body; i=end+1; continue;
+
+            # standalone group
+            if st=="{":
+                body,end,suffix=self._collect_braced(lines,i+1); result=self._run_block(body,stdin=first_stdin); result=self._apply_block_redirect(result,suffix); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
+
+            # for ...; do
+            fm=re.match(r"^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.*?);\s*do\s*(.*)$",st,re.S);
+            if fm:
+                name,expr,tail=fm.groups();
+                if tail.strip() and re.search(r";\s*done\s*;?$",tail):
+                    inline=self._try_inline_for(st); result=inline if inline is not None else Execution(2,err="sumbash: malformed inline for\n"); i+=1;
+                else:
+                    body,end=self._collect_loop_body(lines,i+1); result=self._run_for(name,expr,body); i=end+1;
+                out.append(result.out); err.append(result.err); first_stdin=""; continue;
+
+            # while/until
+            wm=re.match(r"^(while|until)\s+(.*?);\s*do\s*;?$",st,re.S);
+            if wm:
+                body,end=self._collect_loop_body(lines,i+1); result=self._run_while(wm.group(2),body,until=(wm.group(1)=="until")); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
+
+            # if / elif / else / fi
+            im=re.match(r"^if\s+(.*?);\s*then\s*;?$",st,re.S);
+            if im:
+                branches,else_body,end=self._collect_if(lines,i+1,im.group(1)); result=self._run_if_construct(branches,else_body); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
+
+            # case WORD in ... esac
+            cm=re.match(r"^case\s+(.*?)\s+in\s*;?$",st,re.S);
+            if cm:
+                clauses,end=self._collect_case(lines,i+1); result=self._run_case_construct(cm.group(1),clauses); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
+
+            result=self.run_line(raw,capture=True,stdin=first_stdin); out.append(result.out); err.append(result.err); first_stdin=""; i+=1;
+        return Execution(result.code,_stream_join(out),"".join(err));
+
     # ---------- prompt / script ----------
     def prompt(self):
         ps1=self.get("PS1") or r"\u@\h:\w\$ ";
@@ -853,18 +1442,16 @@ class ShellRuntime:
         p=Path(path); p=p if p.is_absolute() else Path(self.cwd)/p;
         try: text=p.read_text(encoding="utf-8",errors="replace");
         except OSError as exc: return Execution(1,err="sumbash: {}: {}\n".format(path,exc));
-        old_argv,old_argv0=self.argv,self.argv0; self.argv=list(args or []); self.argv0=str(path); result=Execution(); out=[]; err=[];
+        old_argv,old_argv0=self.argv,self.argv0; old_exit=self._exit_requested; self.argv=list(args or []); self.argv0=str(path); self._script_depth+=1; self._exit_requested=None;
         try:
-            # a1 executes logical physical lines; backslash continuation is supported.
-            pending="";
-            for raw in text.splitlines():
-                if pending: raw=pending+raw; pending="";
-                if raw.endswith("\\"): pending=raw[:-1]; continue;
-                result=self.run_line(raw,capture=True); out.append(result.out); err.append(result.err);
-            if pending:
-                result=self.run_line(pending,capture=True); out.append(result.out); err.append(result.err);
-        finally: self.argv,self.argv0=old_argv,old_argv0;
-        return Execution(result.code,"".join(out),"".join(err));
+            result=self._run_block(self._logical_lines(text));
+            if self._exit_requested is not None: result.code=int(self._exit_requested);
+            trapcmd=self.traps.get("0") or self.traps.get("EXIT");
+            if trapcmd:
+                saved_exit=self._exit_requested; self._exit_requested=None; tr=self.run_line(trapcmd,capture=True); self._exit_requested=saved_exit; result.out=_stream_join((result.out,tr.out)); result.err+=tr.err;
+            return result;
+        finally:
+            self._script_depth-=1; self._exit_requested=old_exit; self.argv,self.argv0=old_argv,old_argv0;
 
     def interactive_loop(self):
         self.interactive=True; self._setup_readline();

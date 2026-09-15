@@ -50,10 +50,11 @@ def _show_help(file=sys.stdout):
     print("  --remove-links DIR              remove links/copies installed by sumbash",file=file);
     print("  --version                       show version",file=file);
     print("",file=file);
-    print("0.1.0a11 is a vertical alpha: compound Bash grammar (if/for/while/functions/arrays)",file=file);
-    print("is not implemented yet. Variables, expansions, command substitution, fractional",file=file);
-    print("arithmetic, pipelines, redirections, aliases, selected builtins and external",file=file);
-    print("PATH fallback are implemented.",file=file);
+    print("0.1.0a14 is a vertical alpha focused on real SUM maintenance scripts.",file=file);
+    print("It includes indexed/associative arrays, for/while/until, if/elif/else, case,",file=file);
+    print("shell functions with local/return, heredocs, braced groups, globbing, binary",file=file);
+    print("pipelines, fractional arithmetic and external PATH fallback. Full Bash",file=file);
+    print("compatibility, job control and complete option/error semantics are not claimed.",file=file);
 
 
 def _copy_or_link(target,link,mode,force=False):
@@ -143,7 +144,10 @@ def entry_point(arguments=None):
             return _run_direct_applet(args[0],args[1:]);
         else:
             result=runtime.run_script(args[0],args[1:]);
-        if result.out: sys.stdout.write(result.out);
+        if result.out:
+            if isinstance(result.out,(bytes,bytearray)):
+                sys.stdout.buffer.write(bytes(result.out)); sys.stdout.buffer.flush();
+            else: sys.stdout.write(str(result.out));
         if result.err: sys.stderr.write(result.err);
         return result.code;
     except ShellExit as exc: return exc.code;

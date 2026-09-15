@@ -659,15 +659,32 @@ def app_find(argv, stdin="", runtime=None):
     args=list(argv); roots=[];
     while args and not args[0].startswith("-"): roots.append(args.pop(0));
     if not roots: roots=["."];
-    name_pat=None; insensitive=False; ftype=None; maxdepth=None;
+    name_pat=None; insensitive=False; ftype=None; maxdepth=None; action="print"; printf_fmt=None;
     i=0;
     while i<len(args):
         a=args[i];
         if a in ("-name","-iname") and i+1<len(args): name_pat=args[i+1]; insensitive=a=="-iname"; i+=2; continue;
         if a=="-type" and i+1<len(args): ftype=args[i+1]; i+=2; continue;
         if a=="-maxdepth" and i+1<len(args): maxdepth=int(args[i+1]); i+=2; continue;
+        if a=="-print": action="print"; i+=1; continue;
+        if a=="-print0": action="print0"; i+=1; continue;
+        if a=="-printf" and i+1<len(args): action="printf"; printf_fmt=args[i+1]; i+=2; continue;
         i+=1;
     cwd=Path(runtime.cwd if runtime is not None else os.getcwd()); out=[]; err=[]; code=0;
+
+    def render_printf(fmt,p,shown):
+        try: st=p.lstat();
+        except OSError: st=None;
+        parent=str(Path(shown).parent);
+        if parent==".": parent=".";
+        mapping={"%p":shown,"%f":p.name,"%h":parent,"%s":str(st.st_size if st else 0),"%m":format((st.st_mode & 0o7777) if st else 0,"o")};
+        value=str(fmt);
+        for key,replacement in mapping.items(): value=value.replace(key,replacement);
+        value=value.replace("%%","%");
+        # Decode only the portable escapes useful in find -printf, preserving UTF-8 paths.
+        escapes={r"\n":"\n",r"\t":"\t",r"\r":"\r",r"\0":"\0",r"\\":"\\"};
+        for old_escape,new_escape in escapes.items(): value=value.replace(old_escape,new_escape);
+        return value;
     for raw in roots:
         root=Path(raw); root=root if root.is_absolute() else cwd/root;
         if not root.exists(): err.append("find: {}: No such file or directory\n".format(raw)); code=1; continue;
@@ -689,7 +706,9 @@ def app_find(argv, stdin="", runtime=None):
             try: shown=str(p.relative_to(cwd));
             except ValueError: shown=str(p);
             if raw=="." and not shown.startswith("."): shown="./"+shown;
-            out.append(shown+"\n");
+            if action=="print0": out.append(shown+"\0");
+            elif action=="printf": out.append(render_printf(printf_fmt or "",p,shown));
+            else: out.append(shown+"\n");
     return AppletResult(code,"".join(out),"".join(err));
 
 
@@ -1403,7 +1422,7 @@ def app_test(argv, stdin="", runtime=None):
     if args and args[-1] in ("]", "]]" ): args.pop();
     if not args: return AppletResult(1);
     if args[0]=="!": r=app_test(args[1:],stdin,runtime); return AppletResult(0 if r.code else 1);
-    unary={"-e":lambda p:_runtime_path(p,runtime).exists(),"-f":lambda p:_runtime_path(p,runtime).is_file(),"-d":lambda p:_runtime_path(p,runtime).is_dir(),"-x":lambda p:os.access(_runtime_path(p,runtime),os.X_OK),"-r":lambda p:os.access(_runtime_path(p,runtime),os.R_OK),"-w":lambda p:os.access(_runtime_path(p,runtime),os.W_OK),"-z":lambda s:len(s)==0,"-n":lambda s:len(s)!=0};
+    unary={"-e":lambda p:_runtime_path(p,runtime).exists(),"-f":lambda p:_runtime_path(p,runtime).is_file(),"-d":lambda p:_runtime_path(p,runtime).is_dir(),"-x":lambda p:os.access(_runtime_path(p,runtime),os.X_OK),"-r":lambda p:os.access(_runtime_path(p,runtime),os.R_OK),"-w":lambda p:os.access(_runtime_path(p,runtime),os.W_OK),"-t":lambda fd:os.isatty(int(fd)),"-z":lambda s:len(s)==0,"-n":lambda s:len(s)!=0};
     if len(args)>=2 and args[0] in unary:
         try: return AppletResult(0 if unary[args[0]](args[1]) else 1);
         except OSError: return AppletResult(1);

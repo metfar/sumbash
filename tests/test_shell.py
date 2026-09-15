@@ -227,3 +227,192 @@ def test_tee_and_test_follow_shell_cwd_after_cd(tmp_path):
     assert result.out=="hello";
     assert (work/"note.txt").read_text(encoding="utf-8")=="hello";
     assert shell.run_line("test -f note.txt",capture=True).code==0;
+
+
+def test_unquoted_pathname_expansion_and_quoted_literal_pattern(tmp_path):
+    (tmp_path/"alpha.sh").write_text("a",encoding="utf-8");
+    (tmp_path/"beta.sh").write_text("b",encoding="utf-8");
+    (tmp_path/"note.txt").write_text("n",encoding="utf-8");
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_line("echo *sh",capture=True);
+    assert result.code==0;
+    assert result.out=="alpha.sh beta.sh\n";
+    quoted=shell.run_line("echo '*sh'",capture=True);
+    assert quoted.out=="*sh\n";
+
+
+def test_glob_directory_operand_matches_bash_style_ls_use_case(tmp_path):
+    (tmp_path/"borraVersiones.sh").write_text("x",encoding="utf-8");
+    (tmp_path/"sum.sh").write_text("x",encoding="utf-8");
+    d=tmp_path/"sumbash"; d.mkdir(); (d/"sendbash.sh").write_text("x",encoding="utf-8");
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_line("ls *sh",capture=True);
+    assert result.code==0;
+    assert "borraVersiones.sh" in result.out;
+    assert "sum.sh" in result.out;
+    assert "sumbash:" in result.out;
+    assert "sendbash.sh" in result.out;
+
+
+def test_unmatched_glob_stays_literal_and_redirection_detects_ambiguity(tmp_path):
+    shell=ShellRuntime(cwd=tmp_path);
+    assert shell.run_line("printf '%s' no-match-*.zzz",capture=True).out=="no-match-*.zzz";
+    (tmp_path/"a.txt").write_text("",encoding="utf-8");
+    (tmp_path/"b.txt").write_text("",encoding="utf-8");
+    result=shell.run_line("echo hi > *.txt",capture=True);
+    assert result.code==1;
+    assert "ambiguous redirect" in result.err;
+
+
+def test_indexed_array_assignment_and_for_loop():
+    shell=ShellRuntime();
+    result=shell.run_line('PACKAGES=(core ui data)',capture=True);
+    assert result.code==0;
+    assert shell.arrays['PACKAGES']==['core','ui','data'];
+    result=shell.run_line('for f in "${PACKAGES[@]}"; do echo sum$f; done',capture=True);
+    assert result.code==0;
+    assert result.out=='sumcore\nsumui\nsumdata\n';
+
+
+def test_multiline_for_loop_in_script(tmp_path):
+    script=tmp_path/'loop.sh';
+    script.write_text('for f in one two three; do\n  echo "$f"\ndone\n',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==0;
+    assert result.out=='one\ntwo\nthree\n';
+
+
+def test_unquoted_variable_field_splitting_and_globbing(tmp_path):
+    (tmp_path/'one.sh').write_text('1',encoding='utf-8');
+    (tmp_path/'two.sh').write_text('2',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    shell.run_line("packs='one.sh *wo.sh'",capture=True);
+    result=shell.run_line('echo $packs',capture=True);
+    assert result.out=='one.sh two.sh\n';
+
+
+def test_binary_external_pipeline_can_redirect_gzip(tmp_path):
+    import shutil;
+    if not shutil.which('gzip'): return;
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_line("printf 'hello\\n' | gzip > hello.gz",capture=True);
+    assert result.code==0;
+    assert (tmp_path/'hello.gz').read_bytes().startswith(bytes([0x1f,0x8b]));
+    import gzip;
+    assert gzip.decompress((tmp_path/'hello.gz').read_bytes())==b'hello\n';
+
+
+def test_assignment_expansion_does_not_field_split():
+    shell=ShellRuntime();
+    shell.run_line("B='x y'",capture=True);
+    result=shell.run_line('A=$B',capture=True);
+    assert result.code==0;
+    assert shell.get('A')=='x y';
+
+
+def test_functions_local_return_and_if(tmp_path):
+    script=tmp_path/'functions.sh';
+    script.write_text('''X=outer\nfunction choose()\n{\n  local X=inner\n  if [ "$1" = yes ]; then\n    echo "$X:$1"\n    return 0\n  else\n    return 7\n  fi\n}\nchoose yes\necho "$X"\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==0;
+    assert result.out=='inner:yes\nouter\n';
+
+
+def test_associative_arrays_eval_and_parameter_lookup(tmp_path):
+    script=tmp_path/'assoc.sh';
+    script.write_text('''declare -A before\npackage=sumcore\nv=0.1.0a15\narray=before\neval "$array[\\\"$package\\\"]=\\\"$v\\\""\necho "${before[$package]}"\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==0;
+    assert result.out=='0.1.0a15\n';
+
+
+def test_heredoc_is_passed_as_stdin(tmp_path, monkeypatch):
+    import types;
+    script=tmp_path/'here.sh';
+    script.write_text("cat <<'EOF'\n$HOME literal\nEOF\n",encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==0;
+    assert result.out=='$HOME literal\n';
+
+
+def test_braced_group_redirects_aggregate_output(tmp_path):
+    script=tmp_path/'group.sh';
+    script.write_text('''report=report.txt\n{\n echo one\n echo two\n} > "$report"\necho done\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==0;
+    assert result.out=='done\n';
+    assert (tmp_path/'report.txt').read_text(encoding='utf-8')=='one\ntwo\n';
+
+
+def test_case_nested_and_hyphenated_function_name(tmp_path):
+    script=tmp_path/'case.sh';
+    script.write_text('''upgrade-stop() { echo upgrade; }\ncase "$1" in\n  restart)\n    case yes in\n      y*) echo nested ;;\n    esac\n    ;;\n  upgrade-stop) upgrade-stop ;;\n  *) echo other ;;\nesac\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    assert shell.run_script(str(script),['restart']).out=='nested\n';
+    assert shell.run_script(str(script),['upgrade-stop']).out=='upgrade\n';
+
+
+def test_while_break_and_continue(tmp_path):
+    script=tmp_path/'while.sh';
+    script.write_text('''i=0\nwhile [ $i -lt 5 ]; do\n  i=$(($i+1))\n  if [ $i -eq 2 ]; then\n    continue\n  fi\n  echo $i\n  if [ $i -eq 3 ]; then\n    break\n  fi\ndone\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==0;
+    assert result.out=='1\n3\n';
+
+
+def test_script_exit_preserves_previous_output(tmp_path):
+    script=tmp_path/'exit.sh';
+    script.write_text('echo before\nexit 7\necho after\n',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==7;
+    assert result.out=='before\n';
+
+
+def test_parameter_pattern_removal_and_special_ids(monkeypatch):
+    shell=ShellRuntime(argv0='/etc/init.d/apache2-test');
+    assert shell.expand_text('${0##*/}')=='apache2-test';
+    shell.set_var('prog','worker.sh');
+    assert shell.expand_text('${prog%.sh}')=='worker';
+    assert shell.get('PPID').isdigit();
+
+
+def test_source_without_arguments_preserves_positional_parameters(tmp_path):
+    inc=tmp_path/'inc.sh'; inc.write_text('echo "$1:$2"\n',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path,argv=['one','two']);
+    result=shell.run_line('. inc.sh',capture=True);
+    assert result.out=='one:two\n';
+    assert shell.argv==['one','two'];
+
+
+def test_set_positional_and_shift():
+    shell=ShellRuntime(argv=['old']);
+    assert shell.run_line('set alpha beta gamma',capture=True).code==0;
+    assert shell.argv==['alpha','beta','gamma'];
+    assert shell.run_line('shift 2',capture=True).code==0;
+    assert shell.argv==['gamma'];
+
+
+def test_exit_trap_runs_and_script_output_is_preserved(tmp_path):
+    script=tmp_path/'trap.sh';
+    script.write_text("cleanup() { echo cleaned; }\ntrap cleanup 0\necho body\nexit 3\n",encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==3;
+    assert result.out=='body\ncleaned\n';
+
+
+def test_sum_shell_identity_does_not_overwrite_inherited_shell():
+    shell=ShellRuntime(env={'SHELL':'/bin/bash'});
+    assert shell.get('SHELL')=='/bin/bash';
+    assert shell.get('SUM_SHELL');
+    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a14';
+    env=shell.environment();
+    assert env['SHELL']=='/bin/bash';
+    assert env['SUM_SHELL_VERSION']=='0.1.0a14';

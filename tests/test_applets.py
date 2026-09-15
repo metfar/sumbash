@@ -248,3 +248,12 @@ def test_ls_long_raw_size_column_is_right_aligned(tmp_path):
     a_line=next(line for line in lines if line.endswith(" a"));
     b_line=next(line for line in lines if line.endswith(" b"));
     assert b_line.index("1234")+4==a_line.index("7")+1;
+
+
+def test_find_printf_emits_scriptable_paths(tmp_path):
+    from sumbash.shell import ShellRuntime;
+    (tmp_path/'a.txt').write_text('a',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_line(r'''find . -type f -printf "git add %p;\n"''',capture=True);
+    assert result.code==0;
+    assert 'git add ./a.txt;\n' in result.out;
