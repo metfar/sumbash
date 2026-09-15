@@ -1,2 +1,117 @@
 # sumbash
-It is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
+
+`sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
+
+Version `0.1.0a1` is the first concrete vertical alpha.
+
+## Invocation
+
+```text
+sumbash
+sumbash -c 'echo $((5.5*2))'
+sumbash script.sh arg1 arg2
+sumbash find . -iname '*.bas'
+```
+
+The same executable can be invoked through multicall names. On POSIX systems:
+
+```text
+sumbash --install-links ~/.local/sum/bin
+PATH="$HOME/.local/sum/bin:$PATH"
+
+ls -la
+find . -iname '*.bas'
+grep error logfile
+```
+
+`--link-mode auto|symlink|hardlink|copy` controls how names are installed. `auto` tries an appropriate sequence for the host.
+
+## Native SUM arithmetic
+
+Unlike Bash integer arithmetic, SUM arithmetic preserves fractions:
+
+```text
+$ echo $((5.5 * 2))
+11
+
+$ echo $((5 / 2))
+2.5
+
+$ echo $((5 // 2))
+2
+```
+
+The initial math functions are:
+
+```text
+abs(x)
+int(x)
+round(x[, n])
+floor(x)
+ceil(x)
+sqrt(x)
+pow(x, y)
+```
+
+`int()` truncates toward zero. `round()` rounds half values away from zero. Bitwise operators require integer operands instead of silently truncating fractional values.
+
+## Shell features in 0.1.0a1
+
+The first alpha implements a useful subset rather than pretending to be complete Bash:
+
+- UTF-8 command lines, single and double quoting, escapes and comments;
+- variables and positional parameters;
+- `${#name}`, `${name:-default}`, `${name:+word}`, `${name:=word}`, substrings and simple replacements;
+- backtick and `$(...)` command substitution;
+- `$((...))` fractional arithmetic;
+- `;`, `&&`, `||` and internal pipelines;
+- `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`;
+- `cd`, `export`, SUM `global`, `unset`, `readonly`, `alias`, `unalias`, `source`/`.`, `eval`, `command`, `type`, `history`, `read`, `inkey`, `true`, `false`, `exit` and `let`;
+- `command -v`, `command -V`, `type` and `type -a` use the same command resolver as execution;
+- `shopt -s cdspell`, `histappend`, `checkwinsize` and `globstar` state; `cdspell` is active in this alpha;
+- `set -o vi` selects vi editing mode when Python readline provides it;
+- Bash-like PS1 escapes for user, host, working directory, time, date, newline and ANSI escape;
+- external command fallback through `PATH`.
+
+The next language alphas are intended to add compound grammar (`if`, `case`, `for`, `while`), functions/local scope, indexed/associative arrays and fuller Bash/ksh compatibility.
+
+## Portable applets in 0.1.0a1
+
+The package currently ships these internal applets:
+
+```text
+arch basename cat clear cut date dirname echo egrep fgrep find grep
+head hostname ls lsb_release printf pwd realpath rev sed sleep sort
+suminfo tail tee test uname uniq uptime wc whoami [ [[
+```
+
+`sed` is intentionally limited in this first alpha to the common substitution form `s///[g]` plus `p`. Full `awk`, full `sed`, job control and process substitution are not claimed yet. When a name is not a SUM builtin/applet, `sumbash` looks for an executable in the host `PATH`.
+
+## SUM services
+
+System identity is obtained from `sumcore`/`suminfo`, using a portable vocabulary for Linux, Windows and Android. Applets such as `uname`, `lsb_release`, `hostname`, `arch` and `uptime` are views over that common information rather than independent probes.
+
+Examples:
+
+```text
+suminfo --short
+suminfo --field os.distributor
+suminfo --field os.release
+suminfo --field kernel.release
+suminfo --field machine.architecture
+
+uname -a
+lsb_release -a
+uptime -p
+pwd -P
+```
+
+`pwd -P` and `realpath` use canonical paths. A later SUM filesystem backend can map the same semantics onto Android SAF logical paths without exposing `content://` URIs to scripts.
+
+## Scope
+
+`sumbash` is a portable toolbox, not a replacement operating system. Host-specific administration such as user management, hardening, package managers, service managers and specialised programs such as OpenSSL, Git or FFmpeg remain host/external commands.
+
+Historical private scripts were used only to identify shell constructs and practical requirements; they are not incorporated as examples or test fixtures.
+
+<p align=center><b>- oOo -</b></p>

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sumbash"
+version = "0.1.0a1"
+description = "Portable SUM shell and BusyBox-style multicall toolbox."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-2.0-or-later"
+license-files = ["LICENSE"]
+authors = [{name = "William Martinez Bas", email = "metfar@gmail.com"}]
+keywords = ["shell", "bash", "ksh", "unix", "busybox", "multicall", "portable", "sum"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Shells",
+  "Topic :: Utilities",
+]
+dependencies = ["sumcore>=0.1.0a15"]
+
+[project.scripts]
+sumbash = "sumbash.cli:entry_point"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "../sumcore-0.1.0a15/src"]
+testpaths = ["tests"]
