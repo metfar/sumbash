@@ -957,6 +957,7 @@ Keys:
   b, PgUp         previous page
   d / u           half page down / up
   g / G           first / last page
+  F               follow a named file (like tail -f); Ctrl-C stops following
   /PATTERN         search forward (regular expression)
   ?PATTERN         search backward
   n / N            repeat search forward / backward
@@ -965,16 +966,118 @@ Keys:
   h                show this help
 
 Options:
-  -N              show line numbers
-  -S              chop long lines instead of wrapping
-  -i              case-insensitive searches
-  -X              do not use the terminal alternate screen
-  --help          show this help
+  -N                  show line numbers
+  -S                  chop long lines instead of wrapping
+  -i                  case-insensitive searches
+  -X                  do not use the terminal alternate screen
+  -f, --force         force opening non-regular files (less compatibility)
+  -F, --quit-if-one-screen
+                      quit if the whole file fits on one screen
+  --follow            start at the end and follow a named file (SUM extension)
+  --syntax=MODE       auto, none, log, python, bash, json, yaml, ...
+  --no-syntax         disable syntax/semantic highlighting
+  +G                  start at end
+  +F                  start at end and follow
+  +/PATTERN           start at first matching line
+  --help              show this help
+
+Highlighting is applied only to visible terminal rows. Search matches take
+priority over syntax colors. Pygments is used opportunistically for source
+languages when installed; log highlighting is built in.
 """;
 
 
+def _less_detect_syntax(label,text,requested="auto"):
+    requested=(requested or "auto").lower();
+    if requested in ("none","plain","text","off"): return None;
+    aliases={"py":"python","sh":"bash","shell":"bash","sumbash":"bash","js":"javascript","md":"markdown","yml":"yaml","c++":"cpp","r":"r","xbase":"foxpro","sumx":"foxpro","basic":"qbasic","sumbasic":"qbasic"};
+    if requested!="auto": return aliases.get(requested,requested);
+    name=str(label or "").lower(); suffix=Path(name).suffix.lower();
+    ext={
+        ".log":"log",".out":"log",".err":"log",".jsonl":"json",".ndjson":"json",
+        ".py":"python",".pyw":"python",".sh":"bash",".bash":"bash",".ksh":"bash",".zsh":"bash",
+        ".bas":"qbasic",".prg":"foxpro",".r":"r",".json":"json",".yaml":"yaml",".yml":"yaml",
+        ".toml":"toml",".ini":"ini",".cfg":"ini",".md":"markdown",".markdown":"markdown",
+        ".html":"html",".htm":"html",".css":"css",".js":"javascript",".mjs":"javascript",
+        ".sql":"sql",".c":"c",".h":"c",".cc":"cpp",".cpp":"cpp",".cxx":"cpp",".hpp":"cpp",".java":"java",
+    };
+    if suffix in ext: return ext[suffix];
+    first=(text.splitlines()[0] if text else "").strip();
+    if first.startswith("#!"):
+        low=first.lower();
+        if "python" in low: return "python";
+        if any(token in low for token in ("bash","sumbash","/sh","ksh","zsh")): return "bash";
+    sample="\n".join(text.splitlines()[:20]);
+    if re.search(r"\b(?:ERROR|CRITICAL|FATAL|WARNING|WARN|NOTICE|INFO|DEBUG)\b",sample): return "log";
+    if re.search(r"^\s*\[[^\]]*\]\s+(?:NOTICE|WARNING|ERROR|INFO|DEBUG)\b",sample,re.M): return "log";
+    if re.search(r"^\s*(?:\d{1,3}\.){3}\d{1,3}\s+.*\[[^\]]+\].*\"(?:GET|POST|PUT|DELETE|PATCH|HEAD)\s",sample,re.M): return "log";
+    stripped=sample.lstrip();
+    if stripped.startswith(("{","[")) and ('"' in stripped): return "json";
+    return None;
+
+
+_LESS_PYGMENTS_CACHE={};
+def _less_pygments_fragment(text,syntax):
+    try:
+        from pygments import highlight;
+        from pygments.formatters import TerminalFormatter;
+        from pygments.lexers import get_lexer_by_name;
+        if syntax not in _LESS_PYGMENTS_CACHE: _LESS_PYGMENTS_CACHE[syntax]=get_lexer_by_name(syntax);
+        rendered=highlight(text,_LESS_PYGMENTS_CACHE[syntax],TerminalFormatter());
+        if rendered.endswith("\n"): rendered=rendered[:-1];
+        return rendered;
+    except Exception:
+        return text;
+
+
+def _less_log_fragment(text):
+    pattern=re.compile(
+        r"(?P<level>\b(?:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|CRITICAL|FATAL|ALERT|EMERG(?:ENCY)?)\b)"
+        r"|(?P<stamp>\[[0-9]{1,2}-[A-Za-z]{3}-[0-9]{4}[^\]]*\]|\b[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.,][0-9]+)?(?:Z|[+-][0-9:]+)?)"
+        r"|(?P<ip>\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b)"
+        r"|(?P<method>\b(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|CONNECT|TRACE)\b)"
+        r"|(?P<status>\b[1-5][0-9]{2}\b)"
+        r"|(?P<bad>\b(?:failed|failure|denied|refused|timeout|timed\s+out|not\s+permitted|too\s+slow|exited)\b)"
+        r"|(?P<good>\b(?:started|success|successful|ok)\b)"
+        r"|(?P<bool>\b(?:true|false|null)\b)",re.I);
+    level_colors={"TRACE":"\x1b[90m","DEBUG":"\x1b[90m","INFO":"\x1b[36m","NOTICE":"\x1b[1;36m","WARN":"\x1b[1;33m","WARNING":"\x1b[1;33m","ERROR":"\x1b[1;31m","CRITICAL":"\x1b[1;31m","FATAL":"\x1b[1;31m","ALERT":"\x1b[1;31m","EMERG":"\x1b[1;31m","EMERGENCY":"\x1b[1;31m"};
+    def repl(match):
+        value=match.group(0); group=match.lastgroup;
+        if group=="level": color=level_colors.get(value.upper(),"\x1b[36m");
+        elif group=="stamp": color="\x1b[90m";
+        elif group=="ip": color="\x1b[35m";
+        elif group=="method": color="\x1b[1;34m";
+        elif group=="status":
+            color={"1":"\x1b[90m","2":"\x1b[32m","3":"\x1b[36m","4":"\x1b[33m","5":"\x1b[1;31m"}.get(value[:1],"\x1b[36m");
+        elif group=="bad": color="\x1b[33m";
+        elif group=="good": color="\x1b[32m";
+        else: color="\x1b[32m" if value.lower()=="true" else "\x1b[35m";
+        return color+value+"\x1b[0m";
+    return pattern.sub(repl,text);
+
+
+def _less_syntax_fragment(text,syntax):
+    if not syntax: return text;
+    if syntax=="log": return _less_log_fragment(text);
+    return _less_pygments_fragment(text,syntax);
+
+
+def _less_render_fragment(text,syntax=None,search_pattern=None,ignore_case=False):
+    if not search_pattern: return _less_syntax_fragment(text,syntax);
+    flags=re.I if ignore_case else 0;
+    try: rx=re.compile(search_pattern,flags);
+    except re.error: rx=re.compile(re.escape(search_pattern),flags);
+    out=[]; pos=0;
+    for match in rx.finditer(text):
+        if match.start()==match.end(): continue;
+        out.append(_less_syntax_fragment(text[pos:match.start()],syntax));
+        out.append("\x1b[7m"+match.group(0)+"\x1b[27m"); pos=match.end();
+    out.append(_less_syntax_fragment(text[pos:],syntax));
+    return "".join(out);
+
+
 def _less_read_sources(argv, stdin, runtime):
-    args=list(argv); line_numbers=False; chop=False; ignore_case=False; alt_screen=True; start_end=False; initial_search=None; files=[]; i=0;
+    args=list(argv); line_numbers=False; chop=False; ignore_case=False; alt_screen=True; start_end=False; initial_search=None; files=[]; follow=False; force=False; quit_if_one_screen=False; syntax="auto"; i=0;
     while i<len(args):
         arg=args[i];
         if arg=="--": files.extend(args[i+1:]); break;
@@ -983,47 +1086,97 @@ def _less_read_sources(argv, stdin, runtime):
         if arg=="-S": chop=True; i+=1; continue;
         if arg=="-i": ignore_case=True; i+=1; continue;
         if arg=="-X": alt_screen=False; i+=1; continue;
+        if arg in ("--follow","+F"): follow=True; start_end=True; i+=1; continue;
+        if arg in ("-f","--force"): force=True; i+=1; continue;
+        if arg in ("-F","--quit-if-one-screen"): quit_if_one_screen=True; i+=1; continue;
         if arg=="+G": start_end=True; i+=1; continue;
+        if arg=="--no-syntax": syntax="none"; i+=1; continue;
+        if arg=="--syntax":
+            if i+1>=len(args): return None,None,"less: --syntax requires a mode\n",2;
+            syntax=args[i+1]; i+=2; continue;
+        if arg.startswith("--syntax="): syntax=arg.split("=",1)[1]; i+=1; continue;
         if arg.startswith("+/"):
             initial_search=arg[2:]; i+=1; continue;
         if arg.startswith("-") and arg!="-":
             return None, None, "less: unsupported option: {}\n".format(arg), 2;
         files.append(arg); i+=1;
-    base=Path(getattr(runtime,"cwd",os.getcwd())); chunks=[]; labels=[];
+    base=Path(getattr(runtime,"cwd",os.getcwd())); chunks=[]; labels=[]; resolved=[];
     if files:
         for name in files:
-            if name=="-": chunks.append(_text_input(stdin)); labels.append("standard input"); continue;
+            if name=="-": chunks.append(_text_input(stdin)); labels.append("standard input"); resolved.append(None); continue;
             path=Path(name); path=path if path.is_absolute() else base/path;
-            try: chunks.append(path.read_text(encoding="utf-8",errors="replace")); labels.append(str(name));
+            try:
+                if not force and not path.is_file(): return None,None,"less: {}: not a regular file (use -f/--force)\n".format(name),1;
+                chunks.append(path.read_text(encoding="utf-8",errors="replace")); labels.append(str(name)); resolved.append(path);
             except OSError as exc: return None, None, "less: {}: {}\n".format(name,exc), 1;
     elif stdin not in (None,""):
-        chunks.append(_text_input(stdin)); labels.append("standard input");
+        chunks.append(_text_input(stdin)); labels.append("standard input"); resolved.append(None);
     else:
         return None, None, "less: missing filename or input\n", 1;
+    if follow and (len(resolved)!=1 or resolved[0] is None): return None,None,"less: --follow currently requires one named file\n",2;
     if len(chunks)==1: text=chunks[0]; label=labels[0];
     else:
         joined=[];
         for label0,chunk in zip(labels,chunks): joined.append("::::::::::::::\n{}\n::::::::::::::\n{}".format(label0,chunk));
         text="\n".join(joined); label="{} files".format(len(chunks));
-    options={"line_numbers":line_numbers,"chop":chop,"ignore_case":ignore_case,"alt_screen":alt_screen,"start_end":start_end,"initial_search":initial_search,"label":label};
+    follow_path=resolved[0] if len(resolved)==1 and resolved[0] is not None else None; follow_offset=None; follow_identity=None;
+    if follow_path is not None:
+        try:
+            st=follow_path.stat(); follow_offset=st.st_size; follow_identity=(getattr(st,"st_dev",None),getattr(st,"st_ino",None));
+        except OSError: follow_offset=0;
+    syntax_mode=_less_detect_syntax(label,text,syntax);
+    options={"line_numbers":line_numbers,"chop":chop,"ignore_case":ignore_case,"alt_screen":alt_screen,"start_end":start_end,"initial_search":initial_search,"label":label,"follow":follow,"follow_path":follow_path,"follow_offset":follow_offset,"follow_identity":follow_identity,"force":force,"quit_if_one_screen":quit_if_one_screen,"syntax":syntax_mode,"syntax_requested":syntax};
     return text, options, "", 0;
 
 
-def _less_key_reader(control_fd=None):
+def _less_follow_read(options):
+    path=options.get("follow_path");
+    if path is None: return None;
+    path=Path(path);
+    try: st=path.stat();
+    except OSError: return None;
+    identity=(getattr(st,"st_dev",None),getattr(st,"st_ino",None)); old_identity=options.get("follow_identity"); offset=options.get("follow_offset") or 0;
+    if old_identity is not None and identity!=old_identity:
+        try: data=path.read_bytes();
+        except OSError: return None;
+        options["follow_identity"]=identity; options["follow_offset"]=len(data); return ("replace",data.decode("utf-8",errors="replace"));
+    if st.st_size<offset:
+        try: data=path.read_bytes();
+        except OSError: return None;
+        options["follow_identity"]=identity; options["follow_offset"]=len(data); return ("replace",data.decode("utf-8",errors="replace"));
+    if st.st_size==offset: return None;
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset); data=handle.read();
+    except OSError: return None;
+    options["follow_identity"]=identity; options["follow_offset"]=offset+len(data);
+    return ("append",data.decode("utf-8",errors="replace"));
+
+
+def _less_key_reader(control_fd=None,timeout=None):
     if os.name=="nt":
         import msvcrt;
+        if timeout is not None:
+            deadline=time.monotonic()+max(0,float(timeout));
+            while not msvcrt.kbhit():
+                if time.monotonic()>=deadline: return None;
+                time.sleep(0.02);
         ch=msvcrt.getwch();
         if ch in ("\x00","\xe0"):
             code=msvcrt.getwch();
             return {"H":"UP","P":"DOWN","I":"PGUP","Q":"PGDN","K":"LEFT","M":"RIGHT","G":"HOME","O":"END"}.get(code,code);
         return ch;
     import termios;
+    import select;
     fd=sys.stdin.fileno() if control_fd is None else control_fd; old=termios.tcgetattr(fd);
     try:
         new=termios.tcgetattr(fd); new[3] &= ~(termios.ICANON|termios.ECHO); new[6][termios.VMIN]=1; new[6][termios.VTIME]=0; termios.tcsetattr(fd,termios.TCSADRAIN,new);
+        if timeout is not None:
+            ready,_,_=select.select([fd],[],[],max(0,float(timeout)));
+            if not ready: return None;
         first=os.read(fd,1);
         if first!=b"\x1b": return first.decode("utf-8",errors="ignore");
-        import select; seq=bytearray(first);
+        seq=bytearray(first);
         while len(seq)<8:
             ready,_,_=select.select([fd],[],[],0.015);
             if not ready: break;
@@ -1052,12 +1205,12 @@ def _less_visual_rows(lines,width,line_numbers=False,chop=False,h_offset=0):
     for idx,line in enumerate(lines):
         line=line.expandtabs(8); prefix=(str(idx+1).rjust(prefix_width-1)+" ") if line_numbers else "";
         if chop:
-            rows.append((idx,prefix+line[h_offset:h_offset+body_width])); continue;
-        if not line: rows.append((idx,prefix)); continue;
+            rows.append((idx,prefix,line[h_offset:h_offset+body_width])); continue;
+        if not line: rows.append((idx,prefix,"")); continue;
         start=0; first=True;
         while start<len(line):
-            part=line[start:start+body_width]; rows.append((idx,(prefix if first else " "*prefix_width)+part)); first=False; start+=body_width;
-    return rows or [(0,"")];
+            part=line[start:start+body_width]; rows.append((idx,prefix if first else " "*prefix_width,part)); first=False; start+=body_width;
+    return rows or [(0,"","")];
 
 
 def _less_search(lines,pattern,start_line,direction,ignore_case):
@@ -1073,7 +1226,16 @@ def _less_search(lines,pattern,start_line,direction,ignore_case):
     return None;
 
 
-def _less_interactive(text,options):
+def _less_apply_follow_update(lines,update):
+    if not update: return lines;
+    mode,data=update;
+    if mode=="replace": return data.split("\n");
+    if not lines: return data.split("\n");
+    combined=lines[-1]+data; lines[-1:]=combined.split("\n"); return lines;
+
+
+def _less_interactive(text,options,runtime=None):
+    if runtime is not None and not getattr(runtime,"_command_stdout_is_tty",True): return False;
     if not getattr(sys.stdout,"isatty",lambda:False)(): return False;
     control_fd=None; close_control=False;
     if os.name!="nt":
@@ -1081,61 +1243,87 @@ def _less_interactive(text,options):
         else:
             try: control_fd=os.open("/dev/tty",os.O_RDWR); close_control=True;
             except OSError: return False;
-    lines=text.splitlines();
+    lines=text.split("\n");
     if not lines: lines=[""];
-    top=0; h_offset=0; last_search=None; search_direction=1; message=""; alt=options["alt_screen"];
+    if options.get("quit_if_one_screen"):
+        size=shutil.get_terminal_size((80,24)); height=max(1,size.lines-1); width=max(10,size.columns);
+        if len(_less_visual_rows(lines,width,options["line_numbers"],options["chop"],0))<=height: return False;
+    top=0; h_offset=0; last_search=None; search_direction=1; message=""; alt=options["alt_screen"]; follow=bool(options.get("follow")); redraw=True; rows=[]; height=1; width=80; last_size=None;
     if alt: sys.stdout.write("\x1b[?1049h"); sys.stdout.flush();
     try:
         while True:
-            size=shutil.get_terminal_size((80,24)); height=max(1,size.lines-1); width=max(10,size.columns);
-            rows=_less_visual_rows(lines,width,options["line_numbers"],options["chop"],h_offset);
-            if options["start_end"]:
-                top=max(0,len(rows)-height); options["start_end"]=False;
-            if options["initial_search"] is not None:
-                pat=options["initial_search"]; options["initial_search"]=None;
-                hit=_less_search(lines,pat,-1,1,options["ignore_case"]); last_search=pat; search_direction=1;
-                if hit is not None:
-                    for pos,(src,_) in enumerate(rows):
-                        if src==hit: top=pos; break;
-            top=max(0,min(top,max(0,len(rows)-height)));
-            visible=rows[top:top+height];
-            sys.stdout.write("\x1b[H\x1b[2J");
-            for _,row in visible:
-                sys.stdout.write(row[:width]+"\x1b[K\n");
-            if len(visible)<height:
-                for _ in range(height-len(visible)): sys.stdout.write("~\x1b[K\n");
-            first_line=rows[top][0]+1; last_line=visible[-1][0]+1 if visible else first_line; percent=min(100,int((top+height)*100/max(1,len(rows))));
-            status=message or "{}  lines {}-{} / {}  {}%  (q to quit, / to search)".format(options["label"],first_line,last_line,len(lines),percent); message="";
-            sys.stdout.write("\x1b[7m"+status[:width].ljust(width)+"\x1b[0m"); sys.stdout.flush();
-            key=_less_key_reader(control_fd);
-            if key in ("q","Q","\x03"): break;
-            if key in ("DOWN","j","\r","\n"): top+=1; continue;
-            if key in ("UP","k"): top-=1; continue;
-            if key in ("PGDN"," ","f"): top+=height; continue;
-            if key in ("PGUP","b"): top-=height; continue;
-            if key=="d": top+=max(1,height//2); continue;
-            if key=="u": top-=max(1,height//2); continue;
-            if key in ("g","HOME"): top=0; continue;
-            if key in ("G","END"): top=max(0,len(rows)-height); continue;
-            if key=="LEFT" and options["chop"]: h_offset=max(0,h_offset-max(1,width//4)); continue;
-            if key=="RIGHT" and options["chop"]: h_offset+=max(1,width//4); continue;
+            size=shutil.get_terminal_size((80,24)); current_size=(size.columns,size.lines);
+            if current_size!=last_size: redraw=True; last_size=current_size;
+            height=max(1,size.lines-1); width=max(10,size.columns);
+            if redraw:
+                rows=_less_visual_rows(lines,width,options["line_numbers"],options["chop"],h_offset);
+                if options["start_end"]:
+                    top=max(0,len(rows)-height); options["start_end"]=False;
+                if options["initial_search"] is not None:
+                    pat=options["initial_search"]; options["initial_search"]=None;
+                    hit=_less_search(lines,pat,-1,1,options["ignore_case"]); last_search=pat; search_direction=1;
+                    if hit is not None:
+                        for pos,(src,_,_) in enumerate(rows):
+                            if src==hit: top=pos; break;
+                if follow: top=max(0,len(rows)-height);
+                top=max(0,min(top,max(0,len(rows)-height)));
+                visible=rows[top:top+height];
+                sys.stdout.write("\x1b[H\x1b[2J");
+                for _,prefix,fragment in visible:
+                    rendered_prefix=("\x1b[90m"+prefix+"\x1b[0m") if prefix else "";
+                    rendered=_less_render_fragment(fragment,options.get("syntax"),last_search,options["ignore_case"]);
+                    sys.stdout.write(rendered_prefix+rendered+"\x1b[K\n");
+                if len(visible)<height:
+                    for _ in range(height-len(visible)): sys.stdout.write("~\x1b[K\n");
+                first_line=rows[top][0]+1; last_line=visible[-1][0]+1 if visible else first_line; percent=min(100,int((top+height)*100/max(1,len(rows))));
+                follow_tag=" FOLLOW" if follow else ""; syntax_tag=" [{}]".format(options["syntax"]) if options.get("syntax") else "";
+                status=message or "{}{}{}  lines {}-{} / {}  {}%  (q quit, / search, F follow)".format(options["label"],follow_tag,syntax_tag,first_line,last_line,len(lines),percent); message="";
+                sys.stdout.write("\x1b[7m"+status[:width].ljust(width)+"\x1b[0m"); sys.stdout.flush(); redraw=False;
+            try: key=_less_key_reader(control_fd,0.25 if follow else None);
+            except KeyboardInterrupt:
+                if follow: follow=False; message="Follow stopped"; redraw=True;
+                else: message="Interrupted"; redraw=True;
+                continue;
+            if key is None and follow:
+                update=_less_follow_read(options);
+                if update:
+                    lines=_less_apply_follow_update(lines,update); redraw=True;
+                continue;
+            if key in ("q","Q"): break;
+            if key=="\x03":
+                if follow: follow=False; message="Follow stopped"; redraw=True;
+                continue;
+            if key=="F":
+                if options.get("follow_path") is None: message="Follow requires one named file";
+                else: follow=True; top=max(0,len(rows)-height); message="Following; Ctrl-C stops follow";
+                redraw=True; continue;
+            if key in ("DOWN","j","\r","\n"): follow=False; top+=1; redraw=True; continue;
+            if key in ("UP","k"): follow=False; top-=1; redraw=True; continue;
+            if key in ("PGDN"," ","f"): follow=False; top+=height; redraw=True; continue;
+            if key in ("PGUP","b"): follow=False; top-=height; redraw=True; continue;
+            if key=="d": follow=False; top+=max(1,height//2); redraw=True; continue;
+            if key=="u": follow=False; top-=max(1,height//2); redraw=True; continue;
+            if key in ("g","HOME"): follow=False; top=0; redraw=True; continue;
+            if key in ("G","END"): follow=False; top=max(0,len(rows)-height); redraw=True; continue;
+            if key=="LEFT" and options["chop"]: follow=False; h_offset=max(0,h_offset-max(1,width//4)); redraw=True; continue;
+            if key=="RIGHT" and options["chop"]: follow=False; h_offset+=max(1,width//4); redraw=True; continue;
             if key in ("/","?"):
-                sys.stdout.write("\r\x1b[K"); sys.stdout.flush(); pat=_less_prompt_input(key,control_fd);
-                if pat is None: continue;
+                follow=False; sys.stdout.write("\r\x1b[K"); sys.stdout.flush(); pat=_less_prompt_input(key,control_fd);
+                if pat is None: redraw=True; continue;
                 last_search=pat; search_direction=1 if key=="/" else -1; current=rows[top][0]; hit=_less_search(lines,pat,current-search_direction,search_direction,options["ignore_case"]);
-                if hit is None: message="Pattern not found: {}".format(pat); continue;
-                for pos,(src,_) in enumerate(rows):
+                if hit is None: message="Pattern not found: {}".format(pat); redraw=True; continue;
+                for pos,(src,_,_) in enumerate(rows):
                     if src==hit: top=pos; break;
-                continue;
+                redraw=True; continue;
             if key in ("n","N") and last_search:
-                direction=search_direction if key=="n" else -search_direction; current=rows[top][0]; hit=_less_search(lines,last_search,current,direction,options["ignore_case"]);
-                if hit is None: message="Pattern not found: {}".format(last_search); continue;
-                positions=[pos for pos,(src,_) in enumerate(rows) if src==hit];
+                follow=False; direction=search_direction if key=="n" else -search_direction; current=rows[top][0]; hit=_less_search(lines,last_search,current,direction,options["ignore_case"]);
+                if hit is None: message="Pattern not found: {}".format(last_search); redraw=True; continue;
+                positions=[pos for pos,(src,_,_) in enumerate(rows) if src==hit];
                 if positions: top=positions[0];
-                continue;
+                redraw=True; continue;
             if key=="h":
-                message="q quit | arrows/jk line | PgUp/PgDn/space page | g/G ends | / ? search | n/N repeat"; continue;
-            if key=="\x0c": continue;
+                message="q quit | arrows/jk line | PgUp/PgDn page | g/G ends | F follow | / ? search | n/N repeat"; redraw=True; continue;
+            if key=="\x0c": redraw=True; continue;
         return True;
     finally:
         if alt: sys.stdout.write("\x1b[?1049l");
@@ -1149,7 +1337,7 @@ def _less_interactive(text,options):
 def app_less(argv, stdin="", runtime=None):
     text,options,message,code=_less_read_sources(argv,stdin,runtime);
     if text is None: return AppletResult(code,out=message if code==0 else "",err=message if code else "");
-    if _less_interactive(text,options): return AppletResult();
+    if _less_interactive(text,options,runtime): return AppletResult();
     return AppletResult(out=text if text.endswith("\n") or not text else text+"\n");
 
 def app_suminfo(argv, stdin="", runtime=None):

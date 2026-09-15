@@ -122,3 +122,100 @@ def test_less_help():
     assert r.code==0;
     assert "search" in r.out.lower();
     assert "PgDn" in r.out;
+
+
+def test_less_follow_option_requires_named_file():
+    r=run_applet("less",["--follow"],stdin="alpha\n");
+    assert r.code==2;
+    assert "named file" in r.err;
+
+
+def test_less_follow_reads_appended_data_incrementally(tmp_path):
+    from sumbash.applets import _less_follow_read, _less_read_sources;
+    p=tmp_path/"app.log";
+    p.write_text("one\n",encoding="utf-8");
+    text,options,message,code=_less_read_sources(["--follow",str(p)],"",None);
+    assert code==0 and options["follow"] is True;
+    assert options["syntax"]=="log";
+    with p.open("a",encoding="utf-8") as handle: handle.write("two\n");
+    update=_less_follow_read(options);
+    assert update==( "append", "two\n" );
+    assert _less_follow_read(options) is None;
+
+
+def test_less_follow_detects_truncation(tmp_path):
+    from sumbash.applets import _less_follow_read, _less_read_sources;
+    p=tmp_path/"app.log";
+    p.write_text("first line\nsecond line\n",encoding="utf-8");
+    _,options,_,code=_less_read_sources(["+F",str(p)],"",None);
+    assert code==0;
+    p.write_text("new\n",encoding="utf-8");
+    update=_less_follow_read(options);
+    assert update==( "replace", "new\n" );
+
+
+
+def test_less_short_f_is_force_not_follow(tmp_path):
+    from sumbash.applets import _less_read_sources;
+    p=tmp_path/"plain.txt";
+    p.write_text("one\n",encoding="utf-8");
+    _,options,_,code=_less_read_sources(["-f",str(p)],"",None);
+    assert code==0;
+    assert options["force"] is True;
+    assert options["follow"] is False;
+
+
+def test_less_plain_named_file_can_enter_follow_interactively(tmp_path):
+    from sumbash.applets import _less_read_sources;
+    p=tmp_path/"app.log";
+    p.write_text("one\n",encoding="utf-8");
+    _,options,_,code=_less_read_sources([str(p)],"",None);
+    assert code==0;
+    assert options["follow"] is False;
+    assert options["follow_path"]==p;
+    assert options["follow_offset"]==p.stat().st_size;
+
+
+def test_less_plusF_starts_follow(tmp_path):
+    from sumbash.applets import _less_read_sources;
+    p=tmp_path/"app.log";
+    p.write_text("one\n",encoding="utf-8");
+    _,options,_,code=_less_read_sources(["+F",str(p)],"",None);
+    assert code==0;
+    assert options["follow"] is True;
+    assert options["follow_path"]==p;
+
+def test_less_log_highlight_and_search_overlay():
+    from sumbash.applets import _less_detect_syntax, _less_render_fragment;
+    text='[15-Sep-2026 09:47:50] ERROR: 192.168.1.10 failed\n';
+    assert _less_detect_syntax("php-fpm.log",text,"auto")=="log";
+    rendered=_less_render_fragment(text.rstrip("\n"),"log","ERROR",False);
+    assert "\x1b[" in rendered;
+    assert "\x1b[7mERROR\x1b[27m" in rendered;
+
+
+def test_less_log_highlight_http_access_fields():
+    from sumbash.applets import _less_log_fragment;
+    rendered=_less_log_fragment('192.168.61.17 - - [13/Sep/2026:03:41:04 -0300] "GET /index.php HTTP/1.1" 200 true');
+    assert "\x1b[35m192.168.61.17\x1b[0m" in rendered;
+    assert "\x1b[1;34mGET\x1b[0m" in rendered;
+    assert "\x1b[32m200\x1b[0m" in rendered;
+    assert "\x1b[32mtrue\x1b[0m" in rendered;
+
+
+def test_less_capital_F_keeps_traditional_option_slot(tmp_path):
+    from sumbash.applets import _less_read_sources;
+    p=tmp_path/"short.txt"; p.write_text("one\n",encoding="utf-8");
+    _,options,_,code=_less_read_sources(["-F",str(p)],"",None);
+    assert code==0;
+    assert options["quit_if_one_screen"] is True;
+    assert options["follow"] is False;
+
+
+def test_less_syntax_never_colors_non_tty_output(tmp_path):
+    p=tmp_path/"app.log";
+    p.write_text("ERROR failed\n",encoding="utf-8");
+    r=run_applet("less",["--syntax=log",str(p)]);
+    assert r.code==0;
+    assert r.out=="ERROR failed\n";
+    assert "\x1b[" not in r.out;

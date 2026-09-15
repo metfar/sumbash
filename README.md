@@ -2,7 +2,7 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.1.0a9` is the current concrete vertical alpha.
+Version `0.1.0a10` is the current concrete vertical alpha.
 
 ## Invocation
 
@@ -55,11 +55,11 @@ pow(x, y)
 
 `int()` truncates toward zero. `round()` rounds half values away from zero. Bitwise operators require integer operands instead of silently truncating fractional values.
 
-## History semantics in 0.1.0a9
+## History semantics in 0.1.0a10
 
 History records only command lines accepted at the interactive prompt. Commands executed while expanding `PS1`, command substitutions, sourced files, script files and nested `eval` execution are not separate history entries. `HISTCONTROL=ignorespace` and `HISTCONTROL=ignoreboth` suppress a user command line whose first character is a space; `ignoredups`/`ignoreboth` suppress adjacent duplicates. SUM defaults `HISTCONTROL` to `ignoreboth` when the parent environment does not provide it, matching the common Ubuntu interactive-shell convention. Python readline auto-history is disabled when the binding supports it so the shell remains the single owner of history policy.
 
-## Shell features in 0.1.0a9
+## Shell features in 0.1.0a10
 
 The first alpha implements a useful subset rather than pretending to be complete Bash:
 
@@ -82,7 +82,7 @@ The first alpha implements a useful subset rather than pretending to be complete
 
 The next language alphas are intended to add compound grammar (`if`, `case`, `for`, `while`), functions/local scope, indexed/associative arrays and fuller Bash/ksh compatibility.
 
-## Portable applets in 0.1.0a9
+## Portable applets in 0.1.0a10
 
 Relative filesystem operands are resolved against the logical shell current directory (`runtime.cwd`), so internal applets remain coherent after `cd` without changing the Python host process working directory.
 
@@ -109,17 +109,22 @@ Automatic color is suppressed in pipelines and file redirections; `--color=alway
 
 ## Interactive pager (`less`)
 
-`sumbash` now includes a portable `less` applet. When its output is a terminal it
-enters an interactive full-screen pager; when stdout is redirected/piped it behaves
-as a stream filter and emits the input unchanged. The first pager surface supports
-Up/Down or `j`/`k`, PgUp/PgDn, Space, `b`, half-page `d`/`u`, `g`/`G`, forward
-and backward regular-expression search with `/` and `?`, repeat search with `n`/`N`,
-`Ctrl-L` redraw, and `q` to quit. `-N`, `-S`, `-i`, `-X`, `+G` and `+/PATTERN`
-are supported. With `-S`, Left/Right scroll horizontally.
+`sumbash` includes a portable interactive `less` applet. When its output is a terminal it enters a full-screen pager; when stdout is redirected or piped onward it emits the original input unchanged. Navigation supports Up/Down or `j`/`k`, PgUp/PgDn, Space, `b`, half-page `d`/`u`, `g`/`G`, forward/backward regular-expression search with `/` and `?`, repeat search with `n`/`N`, `Ctrl-L` redraw, and `q` to quit. `-N`, `-S`, `-i`, `-X`, `+G` and `+/PATTERN` are supported. With `-S`, Left/Right scroll horizontally.
 
-The pager is implemented inside SUM rather than requiring the host `less`, keeping
-the same useful surface available on Windows and Android terminals. A later release
-can move this pager engine behind `sumdoc`/`sumTerm` without changing the command.
+Alpha a10 adds viewport-only syntax/semantic highlighting. `--syntax=auto` is the default; `--syntax=log`, `--syntax=python`, `--syntax=bash`, `--syntax=json`, and other Pygments lexer names may be selected explicitly, while `--no-syntax`/`--syntax=none` disables highlighting. Log highlighting is built into SUM and marks common timestamps, levels (`NOTICE`, `WARNING`, `ERROR`, etc.), IP addresses, HTTP methods/status codes, success/failure words and boolean/null values. Source-code highlighting uses Pygments opportunistically when available, but Pygments is not required for the pager to function. Search highlighting is rendered above syntax colors, and neither syntax nor search ANSI sequences alter the underlying text used for navigation and matching.
+
+A10 also adds follow mode for named files:
+
+```text
+less +F app.log
+less --follow app.log
+```
+
+`F` enters follow mode from an ordinary pager session and jumps to the end; `Ctrl-C` stops following without leaving `less`, so the user can scroll backward or search, and `F` resumes following. Appended data is read incrementally rather than re-reading the complete file. Truncation or replacement of the followed file is detected and the view is reopened from the new contents. Follow currently requires one named file; SUM's in-memory alpha pipeline model cannot yet stream `tail -f ... | less` continuously.
+
+`-f` / `--force` keeps traditional less semantics for opening non-regular files. `-F` / `--quit-if-one-screen` is also reserved for the traditional less behavior. SUM exposes follow at startup as `+F` or the explicit `--follow` extension; interactive `F` resumes follow mode.
+
+The pager engine remains inside SUM rather than requiring the host `less`, keeping the same useful surface available on Linux, Windows and Android terminals. A later release can move this engine behind `sumdoc`/`sumTerm` without changing the command.
 
 ## Terminal scrollback
 
@@ -153,7 +158,7 @@ pwd -P
 Historical private scripts were used only to identify shell constructs and practical requirements; they are not incorporated as examples or test fixtures.
 
 
-## Interactive completion (0.1.0a9)
+## Interactive completion (0.1.0a10)
 
 When Python is linked with GNU readline, `TAB` completes commands from aliases,
 builtins, SUM applets and `PATH`, and completes filesystem names for arguments.
