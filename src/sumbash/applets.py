@@ -37,6 +37,7 @@ except ImportError:
     _grp=None;
 
 from sumcore import info as suminfo;
+from . import __version__ as _sumbash_version;
 
 
 @dataclass
@@ -48,13 +49,20 @@ class AppletResult:
 
 def _text_input(stdin): return "" if stdin is None else str(stdin);
 
-def _read_paths(paths, stdin=""):
+def _runtime_path(value, runtime=None):
+    path=Path(value);
+    if path.is_absolute(): return path;
+    base=Path(runtime.cwd if runtime is not None else os.getcwd());
+    return base/path;
+
+
+def _read_paths(paths, stdin="", runtime=None):
     if not paths: return [("-", _text_input(stdin))];
-    rows = [];
+    rows=[];
     for value in paths:
-        if value == "-": rows.append(("-", _text_input(stdin))); continue;
-        try: rows.append((value, Path(value).read_text(encoding="utf-8", errors="replace")));
-        except OSError as exc: rows.append((value, exc));
+        if value=="-": rows.append(("-",_text_input(stdin))); continue;
+        try: rows.append((value,_runtime_path(value,runtime).read_text(encoding="utf-8",errors="replace")));
+        except OSError as exc: rows.append((value,exc));
     return rows;
 
 
@@ -98,7 +106,7 @@ def app_cat(argv, stdin="", runtime=None):
         try: stdin=sys.stdin.read();
         except (EOFError,KeyboardInterrupt): stdin="";
     out=[]; err=[]; code=0;
-    for name, value in _read_paths(argv, stdin):
+    for name, value in _read_paths(argv,stdin,runtime):
         if isinstance(value, Exception): err.append("cat: {}: {}\n".format(name, value)); code=1;
         else: out.append(value);
     return AppletResult(code, "".join(out), "".join(err));
@@ -106,7 +114,7 @@ def app_cat(argv, stdin="", runtime=None):
 
 def app_rev(argv, stdin="", runtime=None):
     out=[]; err=[]; code=0;
-    for name, value in _read_paths(argv, stdin):
+    for name, value in _read_paths(argv,stdin,runtime):
         if isinstance(value, Exception): err.append("rev: {}: {}\n".format(name, value)); code=1; continue;
         for line in value.splitlines(True):
             ending = "\n" if line.endswith("\n") else "";
@@ -309,7 +317,7 @@ def app_ls(argv, stdin="", runtime=None):
             arg=args[i];
             if arg=="--": opts["paths"].extend(args[i+1:]); break;
             if arg in ("--help",): return AppletResult(out=_ls_help());
-            if arg in ("--version","-V"): return AppletResult(out="sumbash ls 0.1.0a5\n");
+            if arg in ("--version","-V"): return AppletResult(out="sumbash ls {}\n".format(_sumbash_version));
             if arg.startswith("--"):
                 key,val=(arg[2:].split("=",1)+[None])[:2] if "=" in arg else (arg[2:],None);
                 if key=="format": opts["format"]=val or need(arg);
@@ -660,12 +668,12 @@ def app_grep(argv, stdin="", runtime=None):
     inputs=[];
     if recursive and files:
         for raw in files:
-            p=Path(raw);
+            p=_runtime_path(raw,runtime);
             if p.is_dir(): inputs.extend(str(x) for x in p.rglob("*") if x.is_file());
             else: inputs.append(raw);
     else: inputs=files;
     found=False; out=[]; err=[];
-    for name,value in _read_paths(inputs,stdin):
+    for name,value in _read_paths(inputs,stdin,runtime):
         if isinstance(value,Exception): err.append("grep: {}: {}\n".format(name,value)); continue;
         for lno,line in enumerate(value.splitlines(),1):
             hit=any(r.search(line) for r in regs); hit = not hit if invert else hit;
@@ -698,7 +706,7 @@ def app_cut(argv, stdin="", runtime=None):
             else: n=int(piece); result.append((n,n));
         return result;
     ranges=indexes(fields or chars); out=[]; err=[]; code=0;
-    for name,value in _read_paths(files,stdin):
+    for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("cut: {}: {}\n".format(name,value)); code=1; continue;
         for line in value.splitlines():
             seq=line.split(delim) if fields else list(line); selected=[];
@@ -721,7 +729,7 @@ def app_sed(argv, stdin="", runtime=None):
             pat,repl,flags=parts[0],parts[1],parts[2];
             try: sub=(re.compile(pat),repl,"g" in flags);
             except re.error as exc: return AppletResult(2,err="sed: {}\n".format(exc));
-    for name,value in _read_paths(files,stdin):
+    for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("sed: {}: {}\n".format(name,value)); code=1; continue;
         for line in value.splitlines(True):
             text=line;
@@ -740,7 +748,7 @@ def app_head(argv, stdin="", runtime=None):
         if argv[i].startswith("-") and argv[i][1:].isdigit(): n=int(argv[i][1:]); i+=1; continue;
         files.append(argv[i]); i+=1;
     out=[]; err=[]; code=0;
-    for name,value in _read_paths(files,stdin):
+    for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("head: {}: {}\n".format(name,value)); code=1;
         else: out.extend(value.splitlines(True)[:n]);
     return AppletResult(code,"".join(out),"".join(err));
@@ -753,7 +761,7 @@ def app_tail(argv, stdin="", runtime=None):
         if argv[i].startswith("-") and argv[i][1:].isdigit(): n=int(argv[i][1:]); i+=1; continue;
         files.append(argv[i]); i+=1;
     out=[]; err=[]; code=0;
-    for name,value in _read_paths(files,stdin):
+    for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("tail: {}: {}\n".format(name,value)); code=1;
         else: out.extend(value.splitlines(True)[-n:]);
     return AppletResult(code,"".join(out),"".join(err));
@@ -761,7 +769,7 @@ def app_tail(argv, stdin="", runtime=None):
 
 def app_sort(argv, stdin="", runtime=None):
     reverse="-r" in argv; numeric="-n" in argv; unique="-u" in argv; files=[a for a in argv if not a.startswith("-")]; lines=[]; err=[];
-    for name,value in _read_paths(files,stdin):
+    for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("sort: {}: {}\n".format(name,value)); continue;
         lines.extend(value.splitlines());
     key=(lambda x: float(x.strip() or 0)) if numeric else None;
@@ -772,7 +780,7 @@ def app_sort(argv, stdin="", runtime=None):
 
 
 def app_uniq(argv, stdin="", runtime=None):
-    count="-c" in argv; files=[a for a in argv if not a.startswith("-")]; data=_read_paths(files,stdin); out=[]; err=[]; code=0;
+    count="-c" in argv; files=[a for a in argv if not a.startswith("-")]; data=_read_paths(files,stdin,runtime); out=[]; err=[]; code=0;
     lines=[];
     for name,value in data:
         if isinstance(value,Exception): err.append("uniq: {}: {}\n".format(name,value)); code=1;
@@ -792,7 +800,7 @@ def app_wc(argv, stdin="", runtime=None):
     want_l="-l" in argv; want_w="-w" in argv; want_c="-c" in argv; files=[a for a in argv if not a.startswith("-")];
     if not (want_l or want_w or want_c): want_l=want_w=want_c=True;
     out=[]; err=[]; code=0;
-    for name,value in _read_paths(files,stdin):
+    for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("wc: {}: {}\n".format(name,value)); code=1; continue;
         vals=[];
         if want_l: vals.append(str(len(value.splitlines())));
@@ -810,7 +818,7 @@ def app_tee(argv, stdin="", runtime=None):
     err=[]; code=0; mode="a" if append else "w";
     for raw in files:
         try:
-            with open(raw,mode,encoding="utf-8") as stream: stream.write(_text_input(stdin));
+            with open(_runtime_path(raw,runtime),mode,encoding="utf-8") as stream: stream.write(_text_input(stdin));
         except OSError as exc: err.append("tee: {}: {}\n".format(raw,exc)); code=1;
     return AppletResult(code,_text_input(stdin),"".join(err));
 
@@ -1162,7 +1170,7 @@ def app_test(argv, stdin="", runtime=None):
     if args and args[-1] in ("]", "]]" ): args.pop();
     if not args: return AppletResult(1);
     if args[0]=="!": r=app_test(args[1:],stdin,runtime); return AppletResult(0 if r.code else 1);
-    unary={"-e":lambda p:Path(p).exists(),"-f":lambda p:Path(p).is_file(),"-d":lambda p:Path(p).is_dir(),"-x":lambda p:os.access(p,os.X_OK),"-r":lambda p:os.access(p,os.R_OK),"-w":lambda p:os.access(p,os.W_OK),"-z":lambda s:len(s)==0,"-n":lambda s:len(s)!=0};
+    unary={"-e":lambda p:_runtime_path(p,runtime).exists(),"-f":lambda p:_runtime_path(p,runtime).is_file(),"-d":lambda p:_runtime_path(p,runtime).is_dir(),"-x":lambda p:os.access(_runtime_path(p,runtime),os.X_OK),"-r":lambda p:os.access(_runtime_path(p,runtime),os.R_OK),"-w":lambda p:os.access(_runtime_path(p,runtime),os.W_OK),"-z":lambda s:len(s)==0,"-n":lambda s:len(s)!=0};
     if len(args)>=2 and args[0] in unary:
         try: return AppletResult(0 if unary[args[0]](args[1]) else 1);
         except OSError: return AppletResult(1);

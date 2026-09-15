@@ -205,3 +205,25 @@ def test_complete_directory_action(tmp_path):
     (tmp_path/"docs").mkdir(); (tmp_path/"data.txt").write_text("x",encoding="utf-8");
     assert shell.run_line("complete -d jump",capture=True).code==0;
     assert shell._completion_engine.candidates("jump d")==["docs/"];
+
+
+def test_internal_stream_applets_follow_shell_cwd_after_cd(tmp_path):
+    examples=tmp_path/"examples"; examples.mkdir();
+    (examples/"toolbox.sh").write_text("alpha\nbeta\n",encoding="utf-8");
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_line("cd examples; cat toolbox.sh",capture=True);
+    assert result.code==0;
+    assert result.out=="alpha\nbeta\n";
+    assert shell.run_line("head -n 1 toolbox.sh",capture=True).out=="alpha\n";
+    assert shell.run_line("tail -n 1 toolbox.sh",capture=True).out=="beta\n";
+    assert shell.run_line("wc -l toolbox.sh",capture=True).out.startswith("2 ");
+
+
+def test_tee_and_test_follow_shell_cwd_after_cd(tmp_path):
+    work=tmp_path/"work"; work.mkdir();
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_line("cd work; printf hello | tee note.txt",capture=True);
+    assert result.code==0;
+    assert result.out=="hello";
+    assert (work/"note.txt").read_text(encoding="utf-8")=="hello";
+    assert shell.run_line("test -f note.txt",capture=True).code==0;
