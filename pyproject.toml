@@ -31,5 +31,5 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "../sumcore-0.1.0a25/src"]
+pythonpath = ["src", "../sumcore-0.1.0a15/src"]
 testpaths = ["tests"]
