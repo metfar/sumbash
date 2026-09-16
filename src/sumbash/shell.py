@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a16.
+"""Small portable shell core for sumbash 0.1.0a17.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -151,6 +151,7 @@ class ShellRuntime:
         self._history_loaded = False;
         self._history_file = None;
         self._readline_auto_history_disabled = False;
+        self._startup_loaded = False;
         self.completion_specs = {};
         self._completion_engine = CompletionEngine(self);
         self._completion_cache = [];
@@ -1494,8 +1495,30 @@ class ShellRuntime:
         finally:
             self._script_depth-=1; self._exit_requested=old_exit; self.argv,self.argv0=old_argv,old_argv0;
 
+    def _startup_files(self):
+        explicit=str(self.env.get("SUMBASH_STARTUP","") or "").strip();
+        if explicit:
+            return [Path(value).expanduser() for value in explicit.split(os.pathsep) if str(value).strip()];
+        home=Path(self.env.get("HOME") or self.fsa.home or Path.home()).expanduser();
+        return [home/".sumbashrc",home/".autoexec"];
+
+    def _load_startup_files(self):
+        if self._startup_loaded: return;
+        self._startup_loaded=True;
+        for path in self._startup_files():
+            try:
+                if not path.is_file(): continue;
+            except OSError: continue;
+            result=self._bi_source([str(path)]);
+            self.last_status=result.code;
+            if result.out:
+                if isinstance(result.out,(bytes,bytearray)):
+                    sys.stdout.buffer.write(bytes(result.out)); sys.stdout.buffer.flush();
+                else: sys.stdout.write(str(result.out)); sys.stdout.flush();
+            if result.err: sys.stderr.write(result.err); sys.stderr.flush();
+
     def interactive_loop(self):
-        self.interactive=True; self._setup_readline();
+        self.interactive=True; self._load_startup_files(); self._setup_readline();
         try:
             while True:
                 try:

@@ -412,10 +412,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a16';
+    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a17';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.1.0a16';
+    assert env['SUM_SHELL_VERSION']=='0.1.0a17';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
@@ -451,6 +451,19 @@ def test_source_dot_autoexec_persists_prompt_alias_and_variables(tmp_path):
     second=shell.run_line('source .autoexec',capture=True);
     assert second.code==0;
     assert shell.get('SAMPLE')=='ready';
+
+
+def test_interactive_startup_loads_home_autoexec_once(tmp_path):
+    autoexec=tmp_path/'.autoexec';
+    autoexec.write_text("export STARTED=yes\nalias ll='ls -la'\nPS1='\\033[36mAUTO>\\033[0m '\n",encoding='utf-8');
+    shell=ShellRuntime(env={'HOME':str(tmp_path)},cwd=tmp_path,interactive=True);
+    shell._load_startup_files();
+    assert shell.get('STARTED')=='yes';
+    assert shell.aliases.get('ll')=='ls -la';
+    assert shell.prompt().startswith('\x1b[36mAUTO>\x1b[0m ');
+    autoexec.write_text("export STARTED=twice\n",encoding='utf-8');
+    shell._load_startup_files();
+    assert shell.get('STARTED')=='yes';
 
 
 def test_ls_uses_ansi_colors_by_default_on_tty(tmp_path):
