@@ -180,6 +180,9 @@ def _human_size(value,base=1024):
     return str(int(value));
 
 
+_DEFAULT_LS_COLORS="rs=0:di=01;34:ln=01;36:mh=00:pi=33:so=01;35:do=01;35:bd=01;33:cd=01;33:or=01;31:mi=00:su=37;41:sg=30;43:ca=00:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.gz=01;31:*.bz2=01;31:*.xz=01;31:*.zip=01;31:*.7z=01;31:*.png=01;35:*.jpg=01;35:*.jpeg=01;35:*.gif=01;35:*.svg=01;35:*.mp3=00;36:*.wav=00;36:*.mp4=01;35:*.mkv=01;35";
+
+
 def _parse_ls_colors(value):
     result={};
     for entry in str(value or "").split(":"):
@@ -436,8 +439,8 @@ def app_ls(argv, stdin="", runtime=None):
         if opts["format"]=="long": opts["long"]=True;
         if opts["format"] not in ("columns","rows","commas","long","single","zero"): return AppletResult(2,err="ls: invalid --format value\n");
     if not opts["paths"]: opts["paths"]=["."];
-    env=(runtime.vars if runtime is not None else os.environ); ls_colors=env.get("LS_COLORS",""); colors=_parse_ls_colors(ls_colors);
-    if opts["color"] is None: opts["color"]="auto" if ls_colors else "never";
+    env=(runtime.vars if runtime is not None else os.environ); ls_colors=env.get("LS_COLORS","") or _DEFAULT_LS_COLORS; colors=_parse_ls_colors(ls_colors);
+    if opts["color"] is None: opts["color"]="auto";
     if opts["sort"]=="none" and not opts["color_explicit"] and "f" in "".join(a[1:] for a in argv if a.startswith("-") and not a.startswith("--")): opts["color"]="never";
     output_tty=getattr(runtime,"_command_stdout_is_tty",None) if runtime is not None else None;
     if output_tty is None:

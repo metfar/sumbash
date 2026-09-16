@@ -412,10 +412,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a15';
+    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a16';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.1.0a15';
+    assert env['SUM_SHELL_VERSION']=='0.1.0a16';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
@@ -435,3 +435,34 @@ def test_df_uses_sumfsa_volume_model(tmp_path):
     result=app_df(['-h'],runtime=shell);
     assert result.code==0;
     assert 'Mounted on' in result.out;
+
+
+def test_source_dot_autoexec_persists_prompt_alias_and_variables(tmp_path):
+    autoexec=tmp_path/'.autoexec';
+    autoexec.write_text("export SAMPLE=ready\nalias ll='ls -la'\nPS1='\\033[32mSUM>\\033[0m '\n",encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path,interactive=True);
+    first=shell.run_line('. .autoexec',capture=True);
+    assert first.code==0;
+    assert first.err=='';
+    assert shell.get('SAMPLE')=='ready';
+    assert shell.aliases.get('ll')=='ls -la';
+    assert shell.prompt().startswith('\x1b[32mSUM>\x1b[0m ');
+    shell.set_var('SAMPLE','reset');
+    second=shell.run_line('source .autoexec',capture=True);
+    assert second.code==0;
+    assert shell.get('SAMPLE')=='ready';
+
+
+def test_ls_uses_ansi_colors_by_default_on_tty(tmp_path):
+    (tmp_path/'folder').mkdir();
+    (tmp_path/'run.sh').write_text('#!/bin/sh\n',encoding='utf-8');
+    (tmp_path/'run.sh').chmod(0o755);
+    shell=ShellRuntime(cwd=tmp_path,interactive=True);
+    shell._stdout_is_tty=True;
+    result=shell.run_line('ls',capture=True);
+    assert result.code==0;
+    assert '\x1b[' in result.out;
+    assert '\x1b[01;34mfolder\x1b[0m' in result.out;
+    assert '\x1b[01;32mrun.sh\x1b[0m' in result.out;
+    plain=shell.run_line('ls --color=never',capture=True);
+    assert '\x1b[' not in plain.out;

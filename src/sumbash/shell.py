@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a15.
+"""Small portable shell core for sumbash 0.1.0a16.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -950,10 +950,28 @@ class ShellRuntime:
                 else: out.append("{} is {}\n".format(name,value));
         return Execution(code,"".join(out));
 
+    def _resolve_source_path(self,value):
+        name=str(value or "");
+        if not name: raise FileNotFoundError(name);
+        candidates=[];
+        try: candidates.append(Path(self.native_path(name)));
+        except Exception:
+            expanded=Path(name).expanduser();
+            candidates.append(expanded if expanded.is_absolute() else Path(self.cwd)/expanded);
+        if "/" not in name and "\\" not in name:
+            for directory in str(self.get("PATH") or "").split(os.pathsep):
+                if not directory: continue;
+                candidate=Path(directory).expanduser()/name;
+                if candidate not in candidates: candidates.append(candidate);
+        for candidate in candidates:
+            try:
+                if candidate.is_file(): return candidate;
+            except OSError: pass;
+        return candidates[0];
+
     def _bi_source(self,args):
         if not args: return Execution(2,err="source: filename required\n");
-        p=Path(args[0]).expanduser(); p=p if p.is_absolute() else Path(self.cwd)/p;
-        try: text=p.read_text(encoding="utf-8",errors="replace");
+        try: p=self._resolve_source_path(args[0]); text=p.read_text(encoding="utf-8",errors="replace");
         except OSError as exc: return Execution(1,err="source: {}: {}\n".format(args[0],exc));
         old_argv=self.argv;
         if len(args)>1: self.argv=args[1:];
@@ -1463,8 +1481,7 @@ class ShellRuntime:
         except ValueError: return ps1;
 
     def run_script(self,path,args=None):
-        p=Path(path); p=p if p.is_absolute() else Path(self.cwd)/p;
-        try: text=p.read_text(encoding="utf-8",errors="replace");
+        try: p=self._resolve_source_path(path); text=p.read_text(encoding="utf-8",errors="replace");
         except OSError as exc: return Execution(1,err="sumbash: {}: {}\n".format(path,exc));
         old_argv,old_argv0=self.argv,self.argv0; old_exit=self._exit_requested; self.argv=list(args or []); self.argv0=str(path); self._script_depth+=1; self._exit_requested=None;
         try:
