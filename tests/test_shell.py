@@ -412,10 +412,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a17';
+    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a19';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.1.0a17';
+    assert env['SUM_SHELL_VERSION']=='0.1.0a19';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
@@ -479,3 +479,85 @@ def test_ls_uses_ansi_colors_by_default_on_tty(tmp_path):
     assert '\x1b[01;32mrun.sh\x1b[0m' in result.out;
     plain=shell.run_line('ls --color=never',capture=True);
     assert '\x1b[' not in plain.out;
+
+
+def test_source_autoexec_accepts_nested_if_with_spaced_fi_semicolon(tmp_path):
+    autoexec=tmp_path/'.autoexec';
+    marker=tmp_path/'.Xmodmap';
+    marker.write_text('keycode 1 = Escape\n',encoding='utf-8');
+    content='graf=X\nif [ \"q$graf\" == \"qX\" ]; then\n  export OUTER=yes\n  if [ -f \"$HOME/.Xmodmap\" ] ; then\n    export INNER=yes\n  fi ;\nelse\n  export OUTER=no\nfi\n';
+    autoexec.write_text(content,encoding='utf-8');
+    shell=ShellRuntime(env={'HOME':str(tmp_path)},cwd=tmp_path,interactive=True);
+    result=shell.run_line('. .autoexec',capture=True);
+    assert result.code==0;
+    assert result.err=='';
+    assert shell.get('OUTER')=='yes';
+    assert shell.get('INNER')=='yes';
+
+
+def test_source_syntax_error_returns_error_without_raising(tmp_path):
+    broken=tmp_path/'.autoexec';
+    broken.write_text('if true; then\n  echo never-closed\n',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path,interactive=True);
+    result=shell.run_line('. .autoexec',capture=True);
+    assert result.code==2;
+    assert 'unterminated if' in result.err;
+    follow=shell.run_line('echo still-alive',capture=True);
+    assert follow.code==0;
+    assert follow.out=='still-alive\n';
+
+
+def test_if_closing_keyword_redirects_stdout_and_stderr_as_one_group(tmp_path):
+    script=tmp_path/'if-group-redir.sh';
+    script.write_text('''if true; then\n  echo group-out\n  cat definitely-missing-file\nfi 2>err.txt 1>out.txt\necho after\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==0;
+    assert result.out=='after\n';
+    assert result.err=='';
+    assert (tmp_path/'out.txt').read_text(encoding='utf-8')=='group-out\n';
+    assert 'definitely-missing-file' in (tmp_path/'err.txt').read_text(encoding='utf-8');
+
+
+def test_loop_closing_keyword_redirect_applies_to_whole_loop(tmp_path):
+    script=tmp_path/'loop-group-redir.sh';
+    script.write_text('''for x in one two; do\n  echo $x\ndone >> loop.txt\nwhile false; do\n  echo never\ndone >> loop.txt\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code!=127;
+    assert result.out=='';
+    assert (tmp_path/'loop.txt').read_text(encoding='utf-8')=='one\ntwo\n';
+
+
+def test_case_closing_keyword_redirects_as_group(tmp_path):
+    script=tmp_path/'case-group-redir.sh';
+    script.write_text('''case yes in\n  y*) echo case-out; cat no-such-case-file ;;\nesac 1>case.out 2>case.err\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.out=='';
+    assert result.err=='';
+    assert (tmp_path/'case.out').read_text(encoding='utf-8')=='case-out\n';
+    assert 'no-such-case-file' in (tmp_path/'case.err').read_text(encoding='utf-8');
+
+
+def test_compound_redirect_fd_duplication_obeys_left_to_right_order(tmp_path):
+    script=tmp_path/'dup-group-redir.sh';
+    script.write_text('''if true; then\n  echo visible\n  cat no-such-dup-file\nfi >both.txt 2>&1\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.out=='';
+    assert result.err=='';
+    content=(tmp_path/'both.txt').read_text(encoding='utf-8');
+    assert 'visible\n' in content;
+    assert 'no-such-dup-file' in content;
+
+
+def test_nested_compound_redirect_stays_attached_to_inner_group(tmp_path):
+    script=tmp_path/'nested-group-redir.sh';
+    script.write_text('''if true; then\n  echo outer-before\n  if true; then\n    echo inner\n  fi > inner.txt\n  echo outer-after\nfi > outer.txt\n''',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_script(str(script));
+    assert result.code==0;
+    assert result.out=='';
+    assert (tmp_path/'inner.txt').read_text(encoding='utf-8')=='inner\n';
+    assert (tmp_path/'outer.txt').read_text(encoding='utf-8')=='outer-before\nouter-after\n';

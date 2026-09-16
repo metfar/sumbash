@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a17.
+"""Small portable shell core for sumbash 0.1.0a19.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -45,7 +45,7 @@ from sumio import open_resource;
 
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$");
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S);
-_OPERATORS = ("2>&1", "2>>", "2>", "&&", "||", ">>", "|", ";", ">", "<");
+_OPERATORS = ("2>&1", "1>&2", "2>>", "1>>", "2>", "1>", "0<", "&&", "||", ">>", "|", ";", ">", "<");
 
 
 class ShellWord(str):
@@ -645,26 +645,27 @@ class ShellRuntime:
     def _run_command(self,tokens,stdin="",stdout_is_tty=None,stdin_is_tty=False):
         if not tokens: return Execution();
         # redirects
-        args=[]; in_data=stdin; out_file=None; append=False; err_file=None; err_append=False; merge_err=False; i=0;
+        args=[]; in_data=stdin; out_file=None; append=False; err_file=None; err_append=False; merge_err=False; merge_out=False; i=0;
         command_stdin_is_tty=bool(stdin_is_tty);
         while i<len(tokens):
             tok=tokens[i];
-            if tok in (">",">>","<","2>","2>>"):
+            if tok in (">",">>","1>","1>>","<","0<","2>","2>>"):
                 if i+1>=len(tokens): return Execution(2,err="sumbash: redirection requires a file\n");
                 targets=self._pathname_expand_word(tokens[i+1]);
                 if len(targets)!=1: return Execution(1,err="sumbash: {}: ambiguous redirect\n".format(tokens[i+1]));
                 target=targets[0];
-                if tok=="<":
+                if tok in ("<","0<"):
                     command_stdin_is_tty=False;
                     try:
                         resource=open_resource(self.logical_path(target),"r",filesystem=self.fsa,encoding="utf-8",errors="replace");
                         try: in_data=resource.read();
                         finally: resource.close();
                     except OSError as exc: return Execution(1,err="sumbash: {}: {}\n".format(target,exc));
-                elif tok in (">",">>"): out_file=target; append=(tok==">>");
+                elif tok in (">",">>","1>","1>>"): out_file=target; append=(">>" in tok);
                 else: err_file=target; err_append=(tok=="2>>");
                 i+=2; continue;
             if tok=="2>&1": merge_err=True; i+=1; continue;
+            if tok=="1>&2": merge_out=True; i+=1; continue;
             args.append(tok); i+=1;
         if not args: return Execution();
         args=self._pathname_expand_args(args);
@@ -701,6 +702,9 @@ class ShellRuntime:
             if isinstance(result.out,(bytes,bytearray)): result.out=bytes(result.out)+result.err.encode("utf-8");
             else: result.out=str(result.out)+result.err;
             result.err="";
+        if merge_out and result.out not in ("",b""):
+            result.err += _stream_text(result.out);
+            result.out=b"" if isinstance(result.out,(bytes,bytearray)) else "";
         if out_file:
             try:
                 binary=isinstance(result.out,(bytes,bytearray)); mode=("ab" if append else "wb") if binary else ("a" if append else "w");
@@ -977,7 +981,9 @@ class ShellRuntime:
         old_argv=self.argv;
         if len(args)>1: self.argv=args[1:];
         self._source_depth+=1;
-        try: return self._run_block(self._logical_lines(text));
+        try:
+            try: return self._run_block(self._logical_lines(text));
+            except ValueError as exc: return Execution(2,err="sumbash: {}: {}\n".format(args[0],exc));
         finally:
             self._source_depth-=1;
             if len(args)>1: self.argv=old_argv;
@@ -1276,35 +1282,48 @@ class ShellRuntime:
             body.append(raw); i+=1;
         raise ValueError("unterminated braced block");
 
+    @staticmethod
+    def _compound_close_suffix(text,keyword):
+        """Return redirects/suffix after a compound-command closing keyword.""";
+        value=str(text).strip();
+        if not value.startswith(keyword): return None;
+        rest=value[len(keyword):];
+        if rest and not (rest[0].isspace() or rest[0] in ";<>"): return None;
+        rest=rest.strip();
+        if rest.startswith(";"): rest=rest[1:].strip();
+        return rest;
+
     def _collect_loop_body(self,lines,start):
         body=[]; depth=1; i=start;
         while i<len(lines):
             raw=lines[i]; st=self._control_text(raw).strip();
             if re.match(r"^(?:for\b.*;\s*do|while\b.*;\s*do|until\b.*;\s*do)",st): depth+=1;
-            if st in ("done","done;"):
+            suffix=self._compound_close_suffix(st,"done");
+            if suffix is not None:
                 depth-=1;
-                if depth==0: return body,i;
+                if depth==0: return body,i,suffix;
             body.append(raw); i+=1;
         raise ValueError("unterminated loop");
 
     def _collect_if(self,lines,start,first_cond):
         branches=[]; current=[]; cond=first_cond; else_body=None; depth=1; i=start;
         while i<len(lines):
-            raw=lines[i]; st=self._control_text(raw).strip();
+            raw=lines[i]; st=self._control_text(raw).strip(); normalized=self._strip_semi(st);
             if re.match(r"^if\b.*;\s*then\s*;?$",st): depth+=1; current.append(raw); i+=1; continue;
-            if st in ("fi","fi;"):
+            suffix=self._compound_close_suffix(st,"fi");
+            if suffix is not None:
                 depth-=1;
                 if depth==0:
                     if else_body is not None: else_body.extend(current);
                     else: branches.append((cond,current));
-                    return branches,else_body,i;
+                    return branches,else_body,i,suffix;
                 current.append(raw); i+=1; continue;
             if depth==1:
                 m=re.match(r"^elif\s+(.*?);\s*then\s*;?$",st,re.S);
                 if m:
                     if else_body is not None: raise ValueError("elif after else");
                     branches.append((cond,current)); cond=m.group(1); current=[]; i+=1; continue;
-                if st in ("else","else;"):
+                if normalized=="else":
                     branches.append((cond,current)); cond=None; current=[]; else_body=[]; i+=1; continue;
             current.append(raw); i+=1;
         raise ValueError("unterminated if");
@@ -1317,11 +1336,12 @@ class ShellRuntime:
                 depth+=1;
                 if pattern is not None: body.append(raw);
                 i+=1; continue;
-            if st in ("esac","esac;"):
+            suffix=self._compound_close_suffix(st,"esac");
+            if suffix is not None:
                 depth-=1;
                 if depth==0:
                     if pattern is not None: clauses.append((pattern,body));
-                    return clauses,i;
+                    return clauses,i,suffix;
                 if pattern is not None: body.append(raw);
                 i+=1; continue;
             if depth==1 and pattern is None:
@@ -1343,23 +1363,53 @@ class ShellRuntime:
             i+=1;
         raise ValueError("unterminated case");
 
-    def _apply_block_redirect(self,result,suffix):
+    def _apply_compound_redirects(self,result,suffix):
+        """Apply stdout/stderr redirects to one completed compound command.""";
         tail=self._strip_semi(suffix);
         if not tail: return result;
-        m=re.match(r"^(>>|>)\s*(.+)$",tail,re.S);
-        if not m: return Execution(2,result.out,result.err+"sumbash: unsupported group suffix: {}\n".format(suffix));
-        op,target_expr=m.groups(); tokens=self.tokenize(target_expr);
-        if len(tokens)!=1: return Execution(1,result.out,result.err+"sumbash: ambiguous redirect\n");
-        target=str(tokens[0]); p=Path(target); p=p if p.is_absolute() else Path(self.cwd)/p;
-        try:
-            if isinstance(result.out,(bytes,bytearray)):
-                with open(p,"ab" if op==">>" else "wb") as stream: stream.write(bytes(result.out));
-                out=b"";
-            else:
-                with open(p,"a" if op==">>" else "w",encoding="utf-8") as stream: stream.write(str(result.out));
-                out="";
-            return Execution(result.code,out,result.err);
-        except OSError as exc: return Execution(1,result.out,result.err+"sumbash: {}: {}\n".format(target,exc));
+        try: tokens=self.tokenize(tail);
+        except ValueError as exc: return Execution(2,result.out,result.err+"sumbash: compound redirect: {}\n".format(exc));
+        capture_out=("capture","out"); capture_err=("capture","err"); out_dest=capture_out; err_dest=capture_err; files=[]; i=0;
+        while i<len(tokens):
+            tok=str(tokens[i]);
+            if tok=="2>&1": err_dest=out_dest; i+=1; continue;
+            if tok=="1>&2": out_dest=err_dest; i+=1; continue;
+            if tok in (">",">>","1>","1>>","2>","2>>"):
+                if i+1>=len(tokens): return Execution(2,result.out,result.err+"sumbash: redirection requires a file\n");
+                targets=self._pathname_expand_word(tokens[i+1]);
+                if len(targets)!=1: return Execution(1,result.out,result.err+"sumbash: {}: ambiguous redirect\n".format(tokens[i+1]));
+                target={"kind":"file","path":str(targets[0]),"append":(">>" in tok),"order":len(files)}; files.append(target);
+                if tok.startswith("2"): err_dest=target;
+                else: out_dest=target;
+                i+=2; continue;
+            return Execution(2,result.out,result.err+"sumbash: unsupported compound redirect: {}\n".format(tok));
+
+        final_out=[]; final_err=[]; buckets={};
+        for dest,value in ((out_dest,result.out),(err_dest,result.err)):
+            if value in ("",b""): continue;
+            if dest==capture_out: final_out.append(value); continue;
+            if dest==capture_err: final_err.append(_stream_text(value)); continue;
+            key=id(dest);
+            if key not in buckets: buckets[key]=(dest,[]);
+            buckets[key][1].append(value);
+
+        code=result.code;
+        for target,values in sorted(buckets.values(),key=lambda item:item[0]["order"]):
+            binary=any(isinstance(value,(bytes,bytearray)) for value in values);
+            mode=("ab" if target["append"] else "wb") if binary else ("a" if target["append"] else "w");
+            try:
+                resource=open_resource(self.logical_path(target["path"]),mode,filesystem=self.fsa,encoding="utf-8");
+                try:
+                    payload=b"".join(_stream_bytes(value) for value in values) if binary else "".join(_stream_text(value) for value in values);
+                    resource.write(payload); resource.flush();
+                finally: resource.close();
+            except OSError as exc:
+                code=1; final_err.append("sumbash: {}: {}\n".format(target["path"],exc));
+        return Execution(code,_stream_join(final_out),"".join(final_err));
+
+    def _apply_block_redirect(self,result,suffix):
+        """Backward-compatible name used by the original braced-group path.""";
+        return self._apply_compound_redirects(result,suffix);
 
     def _execute_heredoc(self,lines,index,raw):
         m=re.search(r"<<(-)?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2",raw);
@@ -1437,7 +1487,7 @@ class ShellRuntime:
 
             # standalone group
             if st=="{":
-                body,end,suffix=self._collect_braced(lines,i+1); result=self._run_block(body,stdin=first_stdin); result=self._apply_block_redirect(result,suffix); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
+                body,end,suffix=self._collect_braced(lines,i+1); result=self._run_block(body,stdin=first_stdin); result=self._apply_compound_redirects(result,suffix); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
 
             # for ...; do
             fm=re.match(r"^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.*?);\s*do\s*(.*)$",st,re.S);
@@ -1446,23 +1496,23 @@ class ShellRuntime:
                 if tail.strip() and re.search(r";\s*done\s*;?$",tail):
                     inline=self._try_inline_for(st); result=inline if inline is not None else Execution(2,err="sumbash: malformed inline for\n"); i+=1;
                 else:
-                    body,end=self._collect_loop_body(lines,i+1); result=self._run_for(name,expr,body); i=end+1;
+                    body,end,suffix=self._collect_loop_body(lines,i+1); result=self._run_for(name,expr,body); result=self._apply_compound_redirects(result,suffix); i=end+1;
                 out.append(result.out); err.append(result.err); first_stdin=""; continue;
 
             # while/until
             wm=re.match(r"^(while|until)\s+(.*?);\s*do\s*;?$",st,re.S);
             if wm:
-                body,end=self._collect_loop_body(lines,i+1); result=self._run_while(wm.group(2),body,until=(wm.group(1)=="until")); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
+                body,end,suffix=self._collect_loop_body(lines,i+1); result=self._run_while(wm.group(2),body,until=(wm.group(1)=="until")); result=self._apply_compound_redirects(result,suffix); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
 
             # if / elif / else / fi
             im=re.match(r"^if\s+(.*?);\s*then\s*;?$",st,re.S);
             if im:
-                branches,else_body,end=self._collect_if(lines,i+1,im.group(1)); result=self._run_if_construct(branches,else_body); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
+                branches,else_body,end,suffix=self._collect_if(lines,i+1,im.group(1)); result=self._run_if_construct(branches,else_body); result=self._apply_compound_redirects(result,suffix); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
 
             # case WORD in ... esac
             cm=re.match(r"^case\s+(.*?)\s+in\s*;?$",st,re.S);
             if cm:
-                clauses,end=self._collect_case(lines,i+1); result=self._run_case_construct(cm.group(1),clauses); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
+                clauses,end,suffix=self._collect_case(lines,i+1); result=self._run_case_construct(cm.group(1),clauses); result=self._apply_compound_redirects(result,suffix); out.append(result.out); err.append(result.err); i=end+1; first_stdin=""; continue;
 
             result=self.run_line(raw,capture=True,stdin=first_stdin); out.append(result.out); err.append(result.err); first_stdin=""; i+=1;
         return Execution(result.code,_stream_join(out),"".join(err));

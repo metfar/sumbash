@@ -2,7 +2,7 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.1.0a17` is the current concrete vertical alpha.
+Version `0.1.0a19` is the current concrete vertical alpha.
 
 Interactive startup now loads `~/.sumbashrc` and then `~/.autoexec` when
 those files exist.  `SUMBASH_STARTUP` may be set to an `os.pathsep`-separated
@@ -183,6 +183,26 @@ The a15 shell begins consuming the shared storage/I/O layers instead of owning e
 - external processes still receive a native cwd, so host programs keep normal platform semantics.
 
 This is intentionally the first migration slice, not a claim that every shell filesystem operation has already moved behind sumFSA.
+
+## Compound-command redirection (0.1.0a19)
+
+Redirections attached to a multiline compound-command closing keyword apply to the compound command as a whole, not only to the final command in its body.  This includes `if`/`fi`, `for`/`done`, `while`/`done`, `until`/`done`, `case`/`esac`, and standalone `{ ... }` groups.
+
+Examples:
+
+```bash
+if check_something; then
+    echo normal-output
+    command_that_may_warn
+fi 2>/dev/null 1>/dev/ttyS0
+
+for file in *.log; do
+    process "$file"
+done >>run.log 2>&1
+```
+
+`1>`, `1>>`, `2>`, `2>>`, `2>&1`, and `1>&2` are interpreted as descriptors of the compound command. Descriptor duplication is resolved left-to-right, so `>file 2>&1` sends both captured streams to the same target. Compound redirection is routed through `sumIO`/`sumFSA`, so ordinary logical paths and POSIX device paths use the same resource layer as simple-command redirection.
+
 
 ## Scope
 
