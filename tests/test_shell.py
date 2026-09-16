@@ -412,7 +412,26 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a14';
+    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a15';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.1.0a14';
+    assert env['SUM_SHELL_VERSION']=='0.1.0a15';
+
+
+def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
+    from sumbash.shell import ShellRuntime;
+    shell=ShellRuntime(cwd=tmp_path);
+    result=shell.run_line('echo hello > out.txt; cat out.txt',capture=True);
+    assert result.code==0;
+    assert result.out=='hello\n';
+    assert shell.logical_cwd==shell.fsa.logical_path(tmp_path);
+    assert (tmp_path/'out.txt').read_text(encoding='utf-8')=='hello\n';
+
+
+def test_df_uses_sumfsa_volume_model(tmp_path):
+    from sumbash.applets import app_df;
+    from sumbash.shell import ShellRuntime;
+    shell=ShellRuntime(cwd=tmp_path);
+    result=app_df(['-h'],runtime=shell);
+    assert result.code==0;
+    assert 'Mounted on' in result.out;

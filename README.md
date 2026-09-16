@@ -2,7 +2,7 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.1.0a14` is the current concrete vertical alpha.
+Version `0.1.0a15` is the current concrete vertical alpha.
 
 ## Invocation
 
@@ -55,11 +55,11 @@ pow(x, y)
 
 `int()` truncates toward zero. `round()` rounds half values away from zero. Bitwise operators require integer operands instead of silently truncating fractional values.
 
-## History semantics in 0.1.0a14
+## History semantics in 0.1.0a15
 
 History records only command lines accepted at the interactive prompt. Commands executed while expanding `PS1`, command substitutions, sourced files, script files and nested `eval` execution are not separate history entries. `HISTCONTROL=ignorespace` and `HISTCONTROL=ignoreboth` suppress a user command line whose first character is a space; `ignoredups`/`ignoreboth` suppress adjacent duplicates. SUM defaults `HISTCONTROL` to `ignoreboth` when the parent environment does not provide it, matching the common Ubuntu interactive-shell convention. Python readline auto-history is disabled when the binding supports it so the shell remains the single owner of history policy.
 
-## Shell features in 0.1.0a14
+## Shell features in 0.1.0a15
 
 The first alpha implements a useful subset rather than pretending to be complete Bash:
 
@@ -85,7 +85,7 @@ The first alpha implements a useful subset rather than pretending to be complete
 
 Alpha a14 adds the compound grammar needed by the current SUM maintenance scripts: `if`/`elif`/`else`, `case`, `while`/`until`, shell functions, `local`, `return`, `break`/`continue`, associative arrays, quoted heredocs and braced output groups. Function-local positional parameters and locals are restored on return, and sourcing a file without explicit arguments preserves the caller's positional parameters. Remaining work includes complete Bash option/error semantics, richer `[[ ... ]]`, subshell/job control, full `getopts`, process substitution and other advanced grammar.
 
-## Portable applets in 0.1.0a14
+## Portable applets in 0.1.0a15
 
 Relative filesystem operands are resolved against the logical shell current directory (`runtime.cwd`), so internal applets remain coherent after `cd` without changing the Python host process working directory.
 
@@ -166,6 +166,18 @@ pwd -P
 
 `pwd -P` and `realpath` use canonical paths. A later SUM filesystem backend can map the same semantics onto Android SAF logical paths without exposing `content://` URIs to scripts.
 
+## sumFSA / sumIO integration
+
+The a15 shell begins consuming the shared storage/I/O layers instead of owning every path and redirection detail itself.
+
+- shell cwd now has both native and SUM-logical representations;
+- `cd`, `pwd`, `realpath` and internal file applets resolve through `sumFSA` where applicable;
+- input/output/error redirections are opened through `sumIO`;
+- `df` renders the common `sumFSA` volume model;
+- external processes still receive a native cwd, so host programs keep normal platform semantics.
+
+This is intentionally the first migration slice, not a claim that every shell filesystem operation has already moved behind sumFSA.
+
 ## Scope
 
 `sumbash` is a portable toolbox, not a replacement operating system. Host-specific administration such as user management, hardening, package managers, service managers and specialised programs such as OpenSSL, Git or FFmpeg remain host/external commands.
@@ -173,7 +185,7 @@ pwd -P
 Historical private scripts were used only to identify shell constructs and practical requirements; they are not incorporated as examples or test fixtures.
 
 
-## Interactive completion (0.1.0a14)
+## Interactive completion (0.1.0a15)
 
 When Python is linked with GNU readline, `TAB` completes commands from aliases,
 builtins, SUM applets and `PATH`, and completes filesystem names for arguments.

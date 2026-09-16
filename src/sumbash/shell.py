@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.1.0a14.
+"""Small portable shell core for sumbash 0.1.0a15.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -39,6 +39,8 @@ from . import __version__;
 from .applets import APPLETS, AppletResult, run_applet;
 from .arithmetic import SumArithmeticError, evaluate, format_number;
 from .completion import CompletionEngine, CompletionSpec, format_completion_spec, parse_completion_spec, spec_candidates;
+from sumfsa import FileSystem;
+from sumio import open_resource;
 
 
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$");
@@ -125,6 +127,10 @@ class ShellRuntime:
         self.options = {"cdspell": False, "histappend": False, "checkwinsize": True, "globstar": False};
         self.shell_options = {"vi": False};
         self.cwd = str(Path(cwd or os.getcwd()).resolve());
+        self.fsa = FileSystem(cwd=self.cwd,home=self.env.get("HOME") or str(Path.home()));
+        self.logical_cwd = self.fsa.logical_path(self.cwd);
+        self.vars["PWD"] = self.logical_cwd;
+        self.env["PWD"] = self.logical_cwd;
         self.argv = list(argv or []);
         self.argv0 = str(argv0);
         self.interactive = bool(interactive);
@@ -184,9 +190,22 @@ class ShellRuntime:
 
     def environment(self, overrides=None):
         env={name:str(self.vars.get(name,"")) for name in self.exported};
-        env.update({"PWD":self.cwd});
+        env.update({"PWD":self.logical_cwd});
         if overrides: env.update({k:str(v) for k,v in overrides.items()});
         return env;
+
+    def logical_path(self, value):
+        return self.fsa.normalize(value,cwd=self.logical_cwd);
+
+    def native_path(self, value):
+        return self.fsa.native_path(self.logical_path(value));
+
+    def _set_cwd_native(self, native):
+        self.cwd=str(Path(native).resolve());
+        self.fsa.native_cwd=self.cwd;
+        self.logical_cwd=self.fsa.logical_path(self.cwd);
+        self.fsa.cwd=self.logical_cwd;
+        return self.logical_cwd;
 
     def resolve_command(self, name, all_matches=False):
         matches=[];
@@ -200,7 +219,8 @@ class ShellRuntime:
 
     def _which_external(self, name):
         if os.sep in name or (os.altsep and os.altsep in name):
-            p=Path(name); p=p if p.is_absolute() else Path(self.cwd)/p;
+            try: p=Path(self.native_path(name));
+            except Exception: p=Path(name); p=p if p.is_absolute() else Path(self.cwd)/p;
             return str(p) if p.exists() and os.access(p,os.X_OK) else None;
         return shutil.which(name, path=self.vars.get("PATH", os.environ.get("PATH","")));
 
@@ -635,7 +655,10 @@ class ShellRuntime:
                 target=targets[0];
                 if tok=="<":
                     command_stdin_is_tty=False;
-                    try: in_data=(Path(self.cwd)/target if not Path(target).is_absolute() else Path(target)).read_text(encoding="utf-8",errors="replace");
+                    try:
+                        resource=open_resource(self.logical_path(target),"r",filesystem=self.fsa,encoding="utf-8",errors="replace");
+                        try: in_data=resource.read();
+                        finally: resource.close();
                     except OSError as exc: return Execution(1,err="sumbash: {}: {}\n".format(target,exc));
                 elif tok in (">",">>"): out_file=target; append=(tok==">>");
                 else: err_file=target; err_append=(tok=="2>>");
@@ -678,18 +701,18 @@ class ShellRuntime:
             else: result.out=str(result.out)+result.err;
             result.err="";
         if out_file:
-            p=Path(out_file); p=p if p.is_absolute() else Path(self.cwd)/p;
             try:
-                if isinstance(result.out,(bytes,bytearray)):
-                    with open(p,"ab" if append else "wb") as stream: stream.write(bytes(result.out));
-                else:
-                    with open(p,"a" if append else "w",encoding="utf-8") as stream: stream.write(str(result.out));
-                result.out=b"" if isinstance(result.out,(bytes,bytearray)) else "";
+                binary=isinstance(result.out,(bytes,bytearray)); mode=("ab" if append else "wb") if binary else ("a" if append else "w");
+                resource=open_resource(self.logical_path(out_file),mode,filesystem=self.fsa,encoding="utf-8");
+                try: resource.write(bytes(result.out) if binary else str(result.out)); resource.flush();
+                finally: resource.close();
+                result.out=b"" if binary else "";
             except OSError as exc: result.code=1; result.err += "sumbash: {}: {}\n".format(out_file,exc);
         if err_file:
-            p=Path(err_file); p=p if p.is_absolute() else Path(self.cwd)/p;
             try:
-                with open(p,"a" if err_append else "w",encoding="utf-8") as stream: stream.write(result.err);
+                resource=open_resource(self.logical_path(err_file),"a" if err_append else "w",filesystem=self.fsa,encoding="utf-8");
+                try: resource.write(result.err); resource.flush();
+                finally: resource.close();
                 result.err="";
             except OSError as exc: result.code=1; result.err += "sumbash: {}: {}\n".format(err_file,exc);
         return result;
@@ -803,15 +826,16 @@ class ShellRuntime:
         return Execution(127,err="sumbash: {}: builtin unavailable\n".format(name));
 
     def _bi_cd(self,args):
-        target=args[0] if args else self.get("HOME") or str(Path.home());
-        if target=="-": target=self.get("OLDPWD") or self.cwd;
-        p=Path(target).expanduser(); p=p if p.is_absolute() else Path(self.cwd)/p;
+        target=args[0] if args else self.get("HOME") or self.fsa.home;
+        if target=="-": target=self.get("OLDPWD") or self.logical_cwd;
+        try: p=Path(self.native_path(target));
+        except Exception: p=Path(target).expanduser(); p=p if p.is_absolute() else Path(self.cwd)/p;
         if not p.is_dir() and self.options.get("cdspell"):
             parent=p.parent if p.parent.is_dir() else Path(self.cwd); choices=[x.name for x in parent.iterdir() if x.is_dir()]; match=difflib.get_close_matches(p.name,choices,n=2,cutoff=.72);
             if len(match)==1: p=parent/match[0];
         if not p.is_dir(): return Execution(1,err="cd: {}: No such directory\n".format(target));
-        old=self.cwd; self.cwd=str(p.resolve()); self.set_var("OLDPWD",old,export=True); self.set_var("PWD",self.cwd,export=True);
-        return Execution(out=(self.cwd+"\n") if args and args[0]=="-" else "");
+        old=self.logical_cwd; new_cwd=self._set_cwd_native(str(p)); self.set_var("OLDPWD",old,export=True); self.set_var("PWD",new_cwd,export=True);
+        return Execution(out=(new_cwd+"\n") if args and args[0]=="-" else "");
 
     def _bi_assign(self,mode,args):
         if not args:
@@ -1427,7 +1451,7 @@ class ShellRuntime:
     # ---------- prompt / script ----------
     def prompt(self):
         ps1=self.get("PS1") or r"\u@\h:\w\$ ";
-        host=(self.get("HOSTNAME") or os.environ.get("HOSTNAME") or socket.gethostname() or "host"); cwd=self.cwd; home=self.get("HOME");
+        host=(self.get("HOSTNAME") or os.environ.get("HOSTNAME") or socket.gethostname() or "host"); cwd=self.logical_cwd; home=self.fsa.home;
         if home and cwd.startswith(home): shown="~"+cwd[len(home):];
         else: shown=cwd;
         table={r"\u":getpass.getuser(),r"\h":host.split(".",1)[0],r"\H":host,r"\w":shown,r"\W":Path(cwd).name or cwd,r"\$":"#" if hasattr(os,"geteuid") and os.geteuid()==0 else "$",r"\t":datetime.now().strftime("%H:%M:%S"),r"\d":datetime.now().strftime("%a %b %d"),r"\n":"\n",r"\e":"\x1b",r"\a":"\a",r"\r":"\r",r"\[":"",r"\]":""};

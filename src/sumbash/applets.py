@@ -51,6 +51,9 @@ class AppletResult:
 def _text_input(stdin): return "" if stdin is None else str(stdin);
 
 def _runtime_path(value, runtime=None):
+    if runtime is not None and hasattr(runtime,"fsa"):
+        try: return Path(runtime.fsa.native_path(value,cwd=getattr(runtime,"logical_cwd",runtime.fsa.cwd)));
+        except Exception: pass;
     path=Path(value);
     if path.is_absolute(): return path;
     base=Path(runtime.cwd if runtime is not None else os.getcwd());
@@ -137,20 +140,17 @@ def app_dirname(argv, stdin="", runtime=None):
 
 
 def app_pwd(argv, stdin="", runtime=None):
-    physical = "-P" in argv;
-    cwd = Path(runtime.cwd if runtime is not None else os.getcwd());
-    value = str(cwd.resolve()) if physical else str(cwd);
-    return AppletResult(out=value + "\n");
+    if runtime is not None and hasattr(runtime,"logical_cwd"): return AppletResult(out=str(runtime.logical_cwd)+"\n");
+    physical="-P" in argv; cwd=Path(runtime.cwd if runtime is not None else os.getcwd()); value=str(cwd.resolve()) if physical else str(cwd); return AppletResult(out=value+"\n");
 
 
 def app_realpath(argv, stdin="", runtime=None):
     if not argv: argv=["."];
-    out=[];
-    base = Path(runtime.cwd if runtime is not None else os.getcwd());
+    if runtime is not None and hasattr(runtime,"fsa"):
+        return AppletResult(out="\n".join(runtime.fsa.normalize(raw,cwd=runtime.logical_cwd) for raw in argv)+"\n");
+    out=[]; base=Path(runtime.cwd if runtime is not None else os.getcwd());
     for raw in argv:
-        p=Path(raw);
-        if not p.is_absolute(): p=base/p;
-        out.append(str(p.resolve()));
+        p=Path(raw); p=p if p.is_absolute() else base/p; out.append(str(p.resolve()));
     return AppletResult(out="\n".join(out)+"\n");
 
 
@@ -1440,6 +1440,19 @@ def app_test(argv, stdin="", runtime=None):
     return AppletResult(2,err="test: unsupported expression\n");
 
 
+def app_df(argv,stdin="",runtime=None):
+    if runtime is None or not hasattr(runtime,"fsa"): return AppletResult(1,err="df: sumFSA unavailable\n");
+    human="-h" in argv or "--human-readable" in argv; rows=["Filesystem       Size       Used      Avail  Mounted on"];
+    for volume in runtime.fsa.volumes():
+        total=volume.total_bytes; free=volume.free_bytes; used=None if total is None or free is None else total-free;
+        if human:
+            size=_human_size(total) if total is not None else "?"; used_text=_human_size(used) if used is not None else "?"; free_text=_human_size(free) if free is not None else "?";
+        else:
+            size=str(total if total is not None else "?"); used_text=str(used if used is not None else "?"); free_text=str(free if free is not None else "?");
+        rows.append("{:<12} {:>10} {:>10} {:>10}  {}".format(volume.source or volume.id,size,used_text,free_text,volume.logical_root));
+    return AppletResult(out="\n".join(rows)+"\n");
+
+
 APPLETS = {
     "echo": app_echo, "printf": app_printf, "cat": app_cat, "rev": app_rev,
     "basename": app_basename, "dirname": app_dirname, "pwd": app_pwd, "realpath": app_realpath,
@@ -1447,7 +1460,7 @@ APPLETS = {
     "egrep": app_grep, "fgrep": app_grep, "cut": app_cut, "sed": app_sed, "head": app_head,
     "tail": app_tail, "sort": app_sort, "uniq": app_uniq, "wc": app_wc, "tee": app_tee,
     "date": app_date, "uptime": app_uptime, "uname": app_uname, "lsb_release": app_lsb_release,
-    "hostname": app_hostname, "arch": app_arch, "whoami": app_whoami, "tty": app_tty, "less": app_less, "suminfo": app_suminfo,
+    "hostname": app_hostname, "arch": app_arch, "whoami": app_whoami, "tty": app_tty, "df": app_df, "less": app_less, "suminfo": app_suminfo,
     "test": app_test, "[": app_test, "[[": app_test,
 };
 
