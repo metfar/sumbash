@@ -412,10 +412,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.2.0a2';
+    assert shell.get('SUM_SHELL_VERSION')=='0.2.0a3';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.2.0a2';
+    assert env['SUM_SHELL_VERSION']=='0.2.0a3';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
@@ -656,6 +656,31 @@ def test_context_help_trigger_preserves_line_cursor_and_topic():
     assert restored_point==point;
     assert topic=="GREP";
 
+
+
+def test_context_help_trigger_marker_alone_can_appear_at_cursor_without_prefix():
+    from sumbash.shell import _HELP_CURSOR_MARKER;
+    shell=ShellRuntime();
+    original="grep --color=auto TODO file";
+    point=7;
+    triggered=original[:point]+_HELP_CURSOR_MARKER+original[point:];
+    restored,restored_point,topic=shell._decode_help_trigger(triggered);
+    assert restored==original;
+    assert restored_point==point;
+    assert topic=="GREP";
+
+
+def test_help_readline_macro_does_not_depend_on_ctrl_a():
+    class FakeReadline:
+        def __init__(self): self.bindings=[]; self.hook=None;
+        def parse_and_bind(self,value): self.bindings.append(value);
+        def set_pre_input_hook(self,hook): self.hook=hook;
+    shell=ShellRuntime(); fake=FakeReadline(); shell._bind_help_keys(fake);
+    assert fake.bindings;
+    assert all("\\C-a" not in value for value in fake.bindings);
+    assert all("__SUM_HELP_POINT_4F6D2E__" in value for value in fake.bindings);
+    assert all("\\C-m" in value for value in fake.bindings);
+    assert fake.hook==shell._readline_pre_input_hook;
 
 def test_context_help_prefers_command_when_cursor_is_on_option():
     shell=ShellRuntime();

@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.2.0a2.
+"""Small portable shell core for sumbash 0.2.0a3.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -1139,10 +1139,18 @@ class ShellRuntime:
 
     def _decode_help_trigger(self,line):
         text=str(line or "");
-        if not text.startswith(_HELP_TRIGGER_PREFIX): return None;
-        payload=text[len(_HELP_TRIGGER_PREFIX):]; point=payload.find(_HELP_CURSOR_MARKER);
-        if point<0: point=len(payload); original=payload;
-        else: original=payload[:point]+payload[point+len(_HELP_CURSOR_MARKER):];
+        marker_at=text.find(_HELP_CURSOR_MARKER);
+        if marker_at<0: return None;
+        # a59 prefixed the line by asking readline macros to execute Ctrl-A.
+        # Some readline/libedit builds insert that control byte literally instead,
+        # so a60 makes the marker itself the complete out-of-band request.
+        if text.startswith(_HELP_TRIGGER_PREFIX):
+            payload=text[len(_HELP_TRIGGER_PREFIX):]; point=payload.find(_HELP_CURSOR_MARKER);
+            if point<0: return None;
+            original=payload[:point]+payload[point+len(_HELP_CURSOR_MARKER):];
+        else:
+            point=marker_at;
+            original=text[:point]+text[point+len(_HELP_CURSOR_MARKER):];
         topic=self._context_help_topic(original,point);
         return original,point,topic;
 
@@ -1173,7 +1181,10 @@ class ShellRuntime:
         except Exception: pass;
 
     def _bind_help_keys(self,readline):
-        macro='"{}\\C-a{}\\C-m"'.format(_HELP_CURSOR_MARKER,_HELP_TRIGGER_PREFIX);
+        # Insert one unique marker exactly at rl_point, then accept the line.
+        # Do not use a macro containing Ctrl-A: GNU readline and libedit differ
+        # on whether a control byte embedded in a macro is executed or inserted.
+        macro='"{}\\C-m"'.format(_HELP_CURSOR_MARKER);
         for key in (r'\eOP',r'\e[11~',r'\e[[A',r'\eh',r'\eH'):
             try: readline.parse_and_bind('"{}": {}'.format(key,macro));
             except Exception: pass;

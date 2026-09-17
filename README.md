@@ -2,9 +2,11 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.2.0a2` is the current compatibility-focused alpha line.
+Version `0.2.0a3` is the current compatibility-focused alpha line.
 
-## Navigable contextual help (0.2.0a2)
+`0.2.0a3` makes the F1/Alt+H contextual-help trigger portable across GNU readline/libedit-style macro handling by marking the cursor in place instead of embedding Ctrl-A in a readline macro.
+
+## Navigable contextual help (0.2.0a3)
 
 `sumbash` now uses the reusable SUM help browser from `sumTUI`.  Help source remains editable Markdown and the packaged `.helpdb` database is generated from it.
 
@@ -18,7 +20,7 @@ F4        focus the help text
 Esc       close Help
 ```
 
-The interactive shortcuts preserve the command line that was being edited.  On GNU readline the cursor position is restored as well, so Help behaves like an overlay rather than replacing the pending command.  The explicit forms are also available:
+The interactive shortcuts preserve the command line that was being edited and restore the cursor position when the active readline implementation exposes the editable point, so Help behaves like an overlay rather than replacing the pending command.  The explicit forms are also available:
 
 ```bash
 help
