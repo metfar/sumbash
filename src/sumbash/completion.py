@@ -305,15 +305,25 @@ class CompletionEngine:
         return [_escape_candidate(v,raw) for v in values];
 
     def readline_completer(self,text,state):
-        rl=self.runtime._readline;
+        rl=self.runtime._readline; readline_start=0;
         try:
-            line=rl.get_line_buffer(); cursor=rl.get_endidx();
+            line=rl.get_line_buffer(); cursor=rl.get_endidx(); readline_start=rl.get_begidx();
         except Exception:
-            line=text; cursor=len(text);
+            line=text; cursor=len(text); readline_start=0;
         if state==0:
-            self.runtime._completion_cache=self.candidates(line,cursor);
+            ctx=completion_context(line,cursor); values=self.candidates(line,cursor);
+            # GNU readline determines its replacement span from a flat delimiter
+            # table and therefore treats an escaped/quoted space as a delimiter.
+            # Our shell lexer correctly keeps that space inside the current word.
+            # If readline starts replacing in the middle of that logical word,
+            # return only the not-yet-present suffix or it duplicates the prefix.
+            if readline_start>ctx.start:
+                present=line[ctx.start:readline_start]; adjusted=[];
+                for value in values:
+                    adjusted.append(value[len(present):] if value.startswith(present) else value);
+                values=adjusted;
+            self.runtime._completion_cache=values;
             # Expose the standard Bash variables for future programmable completion.
-            ctx=completion_context(line,cursor);
             self.runtime.vars["COMP_LINE"]=line;
             self.runtime.vars["COMP_POINT"]=str(cursor);
             self.runtime.vars["COMP_CWORD"]=str(max(0,len(ctx.words)));

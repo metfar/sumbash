@@ -412,10 +412,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a21';
+    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a22';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.1.0a21';
+    assert env['SUM_SHELL_VERSION']=='0.1.0a22';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
@@ -561,3 +561,42 @@ def test_nested_compound_redirect_stays_attached_to_inner_group(tmp_path):
     assert result.out=='';
     assert (tmp_path/'inner.txt').read_text(encoding='utf-8')=='inner\n';
     assert (tmp_path/'outer.txt').read_text(encoding='utf-8')=='outer-before\nouter-after\n';
+
+
+def test_readline_completion_does_not_duplicate_escaped_space_prefix(tmp_path):
+    from sumbash.completion import CompletionEngine;
+    parent=tmp_path;
+    cwd=parent/'VirtualBox'; cwd.mkdir();
+    (parent/'VirtualBox VMs').mkdir();
+    shell=ShellRuntime(env={'HOME':str(tmp_path),'PATH':''},cwd=cwd,interactive=True);
+    engine=CompletionEngine(shell); shell._completion_engine=engine;
+
+    class FakeReadline:
+        def __init__(self,line,begidx): self.line=line; self.begidx=begidx;
+        def get_line_buffer(self): return self.line;
+        def get_endidx(self): return len(self.line);
+        def get_begidx(self): return self.begidx;
+
+    line=r'ls ../VirtualBox\ ';
+    shell._readline=FakeReadline(line,len(line));
+    # Readline thinks the escaped blank starts a new word.  Only the missing
+    # suffix must be returned, otherwise the existing path is duplicated.
+    assert engine.readline_completer('',0)=='VMs/';
+    assert engine.readline_completer('',1) is None;
+
+
+def test_readline_completion_keeps_full_candidate_when_span_matches_shell_word(tmp_path):
+    from sumbash.completion import CompletionEngine;
+    (tmp_path/'VirtualBox VMs').mkdir();
+    shell=ShellRuntime(env={'HOME':str(tmp_path),'PATH':''},cwd=tmp_path,interactive=True);
+    engine=CompletionEngine(shell); shell._completion_engine=engine;
+
+    class FakeReadline:
+        def __init__(self,line,begidx): self.line=line; self.begidx=begidx;
+        def get_line_buffer(self): return self.line;
+        def get_endidx(self): return len(self.line);
+        def get_begidx(self): return self.begidx;
+
+    line='ls Vir';
+    shell._readline=FakeReadline(line,3);
+    assert engine.readline_completer('Vir',0)==r'VirtualBox\ VMs/';
