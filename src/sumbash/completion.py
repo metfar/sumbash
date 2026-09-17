@@ -158,7 +158,7 @@ def _restore_tilde(value,text,home):
     return value;
 
 
-def file_candidates(text,cwd,home=None,directories_only=False):
+def file_candidates(text,cwd,home=None,directories_only=False,mark_symlink_dirs=True):
     home=home or str(Path.home()); original=str(text); lookup=_expand_tilde_for_lookup(original,home);
     path=Path(lookup);
     if not path.is_absolute(): path=Path(cwd)/path;
@@ -171,15 +171,17 @@ def file_candidates(text,cwd,home=None,directories_only=False):
         name=entry.name;
         if not prefix.startswith(".") and name.startswith("."): continue;
         if not name.startswith(prefix): continue;
-        try: is_dir=entry.is_dir();
-        except OSError: is_dir=False;
+        try:
+            is_dir=entry.is_dir(); is_symlink=entry.is_symlink();
+        except OSError:
+            is_dir=False; is_symlink=False;
         if directories_only and not is_dir: continue;
         if Path(lookup).is_absolute(): shown=str(entry);
         else:
             base=os.path.dirname(lookup);
             shown=os.path.join(base,name) if base else name;
         shown=_restore_tilde(shown,original,home);
-        if is_dir: shown+=os.sep;
+        if is_dir and (mark_symlink_dirs or not is_symlink): shown+=os.sep;
         results.append(shown);
     return sorted(dict.fromkeys(results),key=lambda v:v.casefold());
 
@@ -291,15 +293,25 @@ class CompletionEngine:
                 values=filtered;
             else: values=command_candidates(text,self.runtime);
             return [_escape_candidate(v,raw) for v in values];
-        command=ctx.command;
-        spec=self.runtime.completion_specs.get(command);
+        command=ctx.command; effective_command=command;
+        alias_value=self.runtime.aliases.get(command);
+        if alias_value:
+            alias_words=_split_command_words(alias_value);
+            if alias_words: effective_command=alias_words[0];
+        spec=self.runtime.completion_specs.get(command) or self.runtime.completion_specs.get(effective_command);
         if spec is not None:
             values=spec_candidates(spec,text,self.runtime);
             if values: return [_escape_candidate(v,raw) for v in values];
             if not ({"default","bashdefault"} & spec.options): return [];
-        if command=="cd": values=file_candidates(text,self.runtime.cwd,self.runtime.get("HOME"),directories_only=True);
-        elif command in ("command","type"): values=command_candidates(text,self.runtime);
-        elif command in ("export","global","readonly","unset"):
+        if effective_command=="cd": values=file_candidates(text,self.runtime.cwd,self.runtime.get("HOME"),directories_only=True);
+        elif effective_command in ("rm","unlink"):
+            # Do not append '/' to symlinks that point at directories.  GNU rm
+            # treats a trailing slash as a request to operate on the directory
+            # target and refuses plain `rm link/`; `rm link` correctly removes
+            # the symlink itself.
+            values=file_candidates(text,self.runtime.cwd,self.runtime.get("HOME"),mark_symlink_dirs=False);
+        elif effective_command in ("command","type"): values=command_candidates(text,self.runtime);
+        elif effective_command in ("export","global","readonly","unset"):
             values=sorted(name for name in self.runtime.vars if name.startswith(text));
         else: values=file_candidates(text,self.runtime.cwd,self.runtime.get("HOME"));
         return [_escape_candidate(v,raw) for v in values];

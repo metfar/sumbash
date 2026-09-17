@@ -412,10 +412,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a22';
+    assert shell.get('SUM_SHELL_VERSION')=='0.2.0a1';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.1.0a22';
+    assert env['SUM_SHELL_VERSION']=='0.2.0a1';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
@@ -600,3 +600,27 @@ def test_readline_completion_keeps_full_candidate_when_span_matches_shell_word(t
     line='ls Vir';
     shell._readline=FakeReadline(line,3);
     assert engine.readline_completer('Vir',0)==r'VirtualBox\ VMs/';
+
+
+def test_rm_completion_does_not_append_slash_to_directory_symlink(tmp_path):
+    from sumbash.completion import CompletionEngine;
+    target=tmp_path/'target'; target.mkdir();
+    link=tmp_path/'link'; link.symlink_to(target,target_is_directory=True);
+    shell=ShellRuntime(env={'HOME':str(tmp_path),'PATH':'/usr/bin:/bin'},cwd=tmp_path,interactive=True);
+    shell.aliases['del']='rm ';
+    engine=CompletionEngine(shell);
+    assert engine.candidates('rm li')==['link'];
+    assert engine.candidates('del li')==['link'];
+    assert engine.candidates('cd li')==['link/'];
+
+
+def test_external_rm_removes_directory_symlink_not_target(tmp_path):
+    target=tmp_path/'target'; target.mkdir();
+    (target/'keep.txt').write_text('keep',encoding='utf-8');
+    link=tmp_path/'link'; link.symlink_to(target,target_is_directory=True);
+    shell=ShellRuntime(env={'HOME':str(tmp_path),'PATH':'/usr/bin:/bin'},cwd=tmp_path);
+    result=shell.run_line('rm link',capture=True);
+    assert result.code==0;
+    assert not link.is_symlink();
+    assert target.is_dir();
+    assert (target/'keep.txt').read_text(encoding='utf-8')=='keep';
