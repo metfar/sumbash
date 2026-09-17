@@ -2,11 +2,11 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.2.0a3` is the current compatibility-focused alpha line.
+Version `0.2.0a4` is the current compatibility-focused alpha line.
 
-`0.2.0a3` makes the F1/Alt+H contextual-help trigger portable across GNU readline/libedit-style macro handling by marking the cursor in place instead of embedding Ctrl-A in a readline macro.
+`0.2.0a4` advances the navigable contextual-help integration to the grouped, mouse-aware `sumTUI 0.8.0a24` browser.  The in-place F1/Alt+H cursor marker introduced in 0.2.0a3 remains the trigger mechanism, so the pending readline buffer and cursor position survive opening and closing Help.
 
-## Navigable contextual help (0.2.0a3)
+## Navigable contextual help (0.2.0a4)
 
 `sumbash` now uses the reusable SUM help browser from `sumTUI`.  Help source remains editable Markdown and the packaged `.helpdb` database is generated from it.
 
@@ -29,7 +29,7 @@ help -i
 help -i grep
 ```
 
-The default help theme is `DOS` to keep the classic two-pane Norton/4DOS-style visual separation; set `SUMBASH_HELP_THEME` to another SUM theme when desired.
+The default help theme is `DOS` to keep the classic two-pane Norton/4DOS-style visual separation.  Topics are grouped by category with short leaf titles, each pane has independent vertical/horizontal scrolling, and mouse clicks/wheel events follow the pane under the pointer.  Set `SUMBASH_HELP_THEME` to another SUM theme when desired.
 
 The editable corpus is `docs/sumbash-help.md`; regenerate the packaged database with `markdown2helpdb docs/sumbash-help.md src/sumbash/sumbash_help.helpdb`.
 
