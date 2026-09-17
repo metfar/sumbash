@@ -102,18 +102,51 @@ def app_printf(argv, stdin="", runtime=None):
     except Exception as exc: return AppletResult(2, err="printf: {}\n".format(exc));
 
 
+def _cat_visible(text,show_ends=False,show_tabs=False):
+    out=[];
+    for char in str(text or ""):
+        code=ord(char);
+        if char=="\n": out.append("$\n" if show_ends else "\n"); continue;
+        if char=="\t": out.append("^I" if show_tabs else "\t"); continue;
+        if code<32: out.append("^"+chr(code+64)); continue;
+        if code==127: out.append("^?"); continue;
+        if 128<=code<=159: out.append("M-^"+chr(code-64)); continue;
+        if 160<=code<=255: out.append("M-"+chr(code-128)); continue;
+        out.append(char);
+    return "".join(out);
+
+
 def app_cat(argv, stdin="", runtime=None):
+    # GNU-compatible diagnostic options are intentionally useful in a shell:
+    # `cat -v` makes terminal escape/control bytes readable as ^[... text.
+    args=list(argv); show_nonprinting=False; show_ends=False; show_tabs=False; operands=[]; options=True;
+    for arg in args:
+        if options and arg=="--": options=False; continue;
+        if options and arg in ("--show-nonprinting","--show-ends","--show-tabs"):
+            if arg=="--show-nonprinting": show_nonprinting=True;
+            elif arg=="--show-ends": show_ends=True;
+            else: show_tabs=True;
+            continue;
+        if options and arg.startswith("-") and arg not in ("-",):
+            if arg=="--help": return AppletResult(out="Usage: cat [OPTION]... [FILE]...\n  -v, --show-nonprinting\n  -E, --show-ends\n  -T, --show-tabs\n  -A  equivalent to -vET\n");
+            if arg in ("-A","-e","-t"):
+                show_nonprinting=True; show_ends=show_ends or arg in ("-A","-e"); show_tabs=show_tabs or arg in ("-A","-t"); continue;
+            short=arg[1:];
+            if short and all(ch in "vET" for ch in short):
+                show_nonprinting=show_nonprinting or "v" in short; show_ends=show_ends or "E" in short; show_tabs=show_tabs or "T" in short; continue;
+            return AppletResult(1,err="cat: unrecognized option '{}'\n".format(arg));
+        operands.append(arg);
     # With no operands, cat reads standard input.  When sumbash owns an
-    # interactive terminal this deliberately reads the real TTY until EOF
-    # (Ctrl-D on POSIX), so `cat > file` behaves like the traditional command.
-    if not argv and runtime is not None and getattr(runtime,"_command_stdin_is_tty",False):
+    # interactive terminal this deliberately reads the real TTY until EOF.
+    if not operands and runtime is not None and getattr(runtime,"_command_stdin_is_tty",False):
         try: stdin=sys.stdin.read();
         except (EOFError,KeyboardInterrupt): stdin="";
     out=[]; err=[]; code=0;
-    for name, value in _read_paths(argv,stdin,runtime):
-        if isinstance(value, Exception): err.append("cat: {}: {}\n".format(name, value)); code=1;
+    for name,value in _read_paths(operands,stdin,runtime):
+        if isinstance(value,Exception): err.append("cat: {}: {}\n".format(name,value)); code=1;
+        elif show_nonprinting or show_ends or show_tabs: out.append(_cat_visible(value,show_ends=show_ends,show_tabs=show_tabs));
         else: out.append(value);
-    return AppletResult(code, "".join(out), "".join(err));
+    return AppletResult(code,"".join(out),"".join(err));
 
 
 def app_rev(argv, stdin="", runtime=None):

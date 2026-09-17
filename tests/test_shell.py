@@ -412,10 +412,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a19';
+    assert shell.get('SUM_SHELL_VERSION')=='0.1.0a20';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.1.0a19';
+    assert env['SUM_SHELL_VERSION']=='0.1.0a20';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):

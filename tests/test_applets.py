@@ -257,3 +257,17 @@ def test_find_printf_emits_scriptable_paths(tmp_path):
     result=shell.run_line(r'''find . -type f -printf "git add %p;\n"''',capture=True);
     assert result.code==0;
     assert 'git add ./a.txt;\n' in result.out;
+
+
+def test_cat_show_nonprinting_makes_escape_sequences_visible():
+    result=run_applet("cat",["-v"],stdin="\x1b[A\x1b[B\x00\x7f\n");
+    assert result.code==0;
+    assert result.out=="^[[A^[[B^@^?\n";
+
+
+def test_cat_show_all_and_clustered_options():
+    result=run_applet("cat",["-A"],stdin="a\tb\n");
+    assert result.code==0;
+    assert result.out=="a^Ib$\n";
+    clustered=run_applet("cat",["-vET"],stdin="\x1b\t\n");
+    assert clustered.out=="^[^I$\n";
