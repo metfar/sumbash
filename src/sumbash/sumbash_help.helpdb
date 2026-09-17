@@ -1,0 +1,423 @@
+{
+  "schema_version": 1,
+  "title": "sumbash Help",
+  "intro": "Keyboard-first help for the SUM shell. Press F1 or Alt+H while editing a command to open contextual help without losing the command line. Use F3 inside the browser to search topics.",
+  "topics": [
+    {
+      "name": "Overview",
+      "category": "Getting started",
+      "summary": "sumbash is the portable SUM shell. It combines a Bash-oriented command language, SUM filesystem/stream abstractions, builtins, portable applets and external command fallback.",
+      "syntax": [
+        "sumbash",
+        "sumbash -c 'COMMAND'",
+        "sumbash SCRIPT [ARG...]"
+      ],
+      "example": "printf 'b\\na\\na\\n' | sort | uniq -c",
+      "notes": [
+        "Interactive commands use GNU readline when available.",
+        "External full-screen programs inherit the controlling terminal.",
+        "SUM applets are used before external fallback when the command name matches an applet."
+      ],
+      "see_also": [
+        "Keyboard",
+        "Help",
+        "Pipelines",
+        "Redirection",
+        "Command resolution"
+      ],
+      "aliases": [
+        "shell",
+        "start"
+      ],
+      "language": "bash"
+    },
+    {
+      "name": "Keyboard",
+      "category": "Getting started",
+      "summary": "Interactive editing, completion and help shortcuts.",
+      "syntax": [
+        "Tab       complete commands, paths and variables",
+        "F1        contextual help",
+        "Alt+H     contextual help",
+        "Ctrl+L    clear/redraw the command line",
+        "Ctrl+D    end the interactive shell on an empty command line"
+      ],
+      "example": "Type:  cd ../Vir\nPress: Tab",
+      "notes": [
+        "F1 and Alt+H preserve the line being edited and restore the cursor position when GNU readline exposes it.",
+        "Completion preserves the real case of filesystem names."
+      ],
+      "see_also": [
+        "Help",
+        "Completion",
+        "History"
+      ],
+      "aliases": [
+        "keys",
+        "shortcuts"
+      ],
+      "language": "text"
+    },
+    {
+      "name": "Help",
+      "category": "Getting started",
+      "summary": "Open textual or interactive help.",
+      "syntax": [
+        "help",
+        "help TOPIC",
+        "help -i",
+        "help -i TOPIC"
+      ],
+      "example": "help cd\nhelp -i grep",
+      "notes": [
+        "F1 and Alt+H open the same interactive browser contextually.",
+        "F1 inside the browser returns to Contents.",
+        "F2 focuses the topic list, F3 focuses Search, F4 focuses the topic text and Esc closes Help."
+      ],
+      "see_also": [
+        "Keyboard",
+        "Command index"
+      ],
+      "aliases": [
+        "?",
+        "helpbrowser"
+      ],
+      "language": "bash"
+    },
+    {
+      "name": "Command index",
+      "category": "Getting started",
+      "summary": "Builtins and portable applets currently exposed by sumbash.",
+      "syntax": [
+        "Builtins: alias cd command complete compgen compopt declare eval exit export global help history inkey let local logout read readonly return set shift shopt source trap type umask unalias unset",
+        "Applets: arch basename cat clear cut date df dirname echo egrep fgrep find grep head hostname less ls lsb_release printf pwd realpath rev sed sleep sort suminfo tail tee test tty uname uniq uptime wc whoami"
+      ],
+      "example": "type ls\ncommand -V grep",
+      "notes": [
+        "`type NAME` reports how a command resolves.",
+        "`command -V NAME` gives a verbose resolution description."
+      ],
+      "see_also": [
+        "Command resolution",
+        "Applets"
+      ],
+      "aliases": [
+        "commands",
+        "builtins"
+      ],
+      "language": "bash"
+    },
+    {
+      "name": "CD",
+      "category": "Navigation and shell state",
+      "summary": "Change the current directory.",
+      "syntax": [
+        "cd [DIR]",
+        "cd -"
+      ],
+      "example": "cd projects\ncd -",
+      "notes": [
+        "Without DIR, CD uses HOME.",
+        "`cd -` returns to OLDPWD and prints the resulting directory.",
+        "`shopt -s cdspell` enables a conservative spelling correction when exactly one close directory match exists."
+      ],
+      "see_also": [
+        "PWD",
+        "SHOPT"
+      ],
+      "aliases": [
+        "chdir"
+      ],
+      "language": "bash"
+    },
+    {
+      "name": "PWD",
+      "category": "Navigation and shell state",
+      "summary": "Print the current working directory.",
+      "syntax": [
+        "pwd",
+        "pwd -L",
+        "pwd -P"
+      ],
+      "example": "pwd -P",
+      "notes": [
+        "`pwd -P` resolves the physical filesystem path.",
+        "Logical path handling is provided through sumFSA."
+      ],
+      "see_also": [
+        "CD"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "ALIAS",
+      "category": "Navigation and shell state",
+      "summary": "Create or display shell aliases.",
+      "syntax": [
+        "alias",
+        "alias NAME='VALUE'",
+        "alias NAME",
+        "unalias NAME"
+      ],
+      "example": "alias DIR='ls -h '\nalias DIR",
+      "notes": [
+        "Exact aliases have precedence during command resolution.",
+        "Trailing spaces in historical aliases are preserved."
+      ],
+      "see_also": [
+        "Command resolution",
+        "SOURCE"
+      ],
+      "aliases": [
+        "aliases"
+      ],
+      "language": "bash"
+    },
+    {
+      "name": "SHOPT",
+      "category": "Navigation and shell state",
+      "summary": "Enable, disable or query shell options.",
+      "syntax": [
+        "shopt",
+        "shopt -s OPTION",
+        "shopt -u OPTION",
+        "shopt -q OPTION"
+      ],
+      "example": "shopt -s cdspell\nshopt -q cdspell",
+      "notes": [
+        "Unknown option names are rejected rather than silently accepted."
+      ],
+      "see_also": [
+        "CD",
+        "SET"
+      ],
+      "aliases": [
+        "options"
+      ],
+      "language": "bash"
+    },
+    {
+      "name": "History",
+      "category": "Navigation and shell state",
+      "summary": "Display or manage interactive command history.",
+      "syntax": [
+        "history [N]",
+        "history -c",
+        "history -w",
+        "history -a"
+      ],
+      "example": "history 20",
+      "notes": [
+        "HISTCONTROL and HISTSIZE are honored by the interactive shell.",
+        "Infrastructure commands, prompt substitutions and sourced lines are not inserted as separate interactive history entries."
+      ],
+      "see_also": [
+        "Keyboard"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "Completion",
+      "category": "Navigation and shell state",
+      "summary": "Native command, path and variable completion.",
+      "syntax": [
+        "Tab completes the word at the cursor."
+      ],
+      "example": "ls ../VirtualBox\\ V<Tab>",
+      "notes": [
+        "Escaped spaces remain part of the same logical word.",
+        "Directory symlinks are not forced to end in `/` for destructive commands such as rm or unlink.",
+        "CD completion can append `/` because it is navigating into the directory target."
+      ],
+      "see_also": [
+        "Keyboard",
+        "CD"
+      ],
+      "aliases": [],
+      "language": "text"
+    },
+    {
+      "name": "Pipelines",
+      "category": "Shell language",
+      "summary": "Connect stdout of one command to stdin of the next.",
+      "syntax": [
+        "COMMAND1 | COMMAND2 [| COMMAND3 ...]"
+      ],
+      "example": "alias | grep rsync",
+      "notes": [
+        "Text applets and external commands can participate in pipelines.",
+        "Binary external output is preserved when captured or redirected."
+      ],
+      "see_also": [
+        "Redirection"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "Redirection",
+      "category": "Shell language",
+      "summary": "Redirect command or compound-command input/output.",
+      "syntax": [
+        "COMMAND > FILE",
+        "COMMAND >> FILE",
+        "COMMAND 2> FILE",
+        "COMMAND < FILE"
+      ],
+      "example": "if true; then echo ok; fi > result.txt",
+      "notes": [
+        "Redirections attached to compound closers apply to the whole compound command.",
+        "Binary stdout is preserved for external pipelines and files."
+      ],
+      "see_also": [
+        "Pipelines"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "Command resolution",
+      "category": "Shell language",
+      "summary": "Resolve aliases, functions, builtins, SUM applets and external commands.",
+      "syntax": [
+        "type NAME",
+        "command -v NAME",
+        "command -V NAME"
+      ],
+      "example": "type grep\ncommand -V ls",
+      "notes": [
+        "Resolution prefers exact aliases/functions/builtins/applets before external fallback."
+      ],
+      "see_also": [
+        "Command index",
+        "ALIAS"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "Applets",
+      "category": "Portable applets",
+      "summary": "Portable commands implemented inside sumbash.",
+      "syntax": [
+        "arch basename cat clear cut date df dirname echo egrep fgrep find grep head hostname less ls lsb_release printf pwd realpath rev sed sleep sort suminfo tail tee test tty uname uniq uptime wc whoami"
+      ],
+      "example": "df -h",
+      "notes": [
+        "Applets aim for practical GNU/BSD compatibility while remaining portable.",
+        "Unsupported options should fail explicitly instead of being reinterpreted as operands."
+      ],
+      "see_also": [
+        "Command index",
+        "GREP",
+        "DF",
+        "LS",
+        "LESS"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "GREP",
+      "category": "Portable applets",
+      "summary": "Search text for matching lines.",
+      "syntax": [
+        "grep [OPTION]... PATTERN [FILE]...",
+        "grep -E PATTERN [FILE]...",
+        "grep -F STRING [FILE]..."
+      ],
+      "example": "alias | grep --color=auto rsync",
+      "notes": [
+        "Supports practical options including -i, -v, -n, -q, -r/-R, -E, -F, -e, -A/-B/-C and --color=auto|always|never.",
+        "egrep and fgrep select extended-regexp and fixed-string behavior."
+      ],
+      "see_also": [
+        "Pipelines",
+        "LESS"
+      ],
+      "aliases": [
+        "egrep",
+        "fgrep"
+      ],
+      "language": "bash"
+    },
+    {
+      "name": "DF",
+      "category": "Portable applets",
+      "summary": "Report filesystem space usage.",
+      "syntax": [
+        "df [-h] [-a] [-T]"
+      ],
+      "example": "df -h",
+      "notes": [
+        "`-h` prints human-readable sizes.",
+        "Normal output suppresses noisy pseudo-filesystems such as common loop/squashfs mounts; `-a` requests all entries."
+      ],
+      "see_also": [
+        "Applets"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "LS",
+      "category": "Portable applets",
+      "summary": "List directory contents.",
+      "syntax": [
+        "ls [OPTION]... [FILE]..."
+      ],
+      "example": "ls ../VirtualBox ../VirtualBox\\ VMs/",
+      "notes": [
+        "Multiple operands and escaped spaces follow shell tokenization rules.",
+        "Use `ls --help` for the current portable option set."
+      ],
+      "see_also": [
+        "Completion",
+        "Applets"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "LESS",
+      "category": "Portable applets",
+      "summary": "Interactive pager implemented by sumbash.",
+      "syntax": [
+        "less [OPTION]... [FILE]..."
+      ],
+      "example": "grep --color=always -n TODO *.py | less -R",
+      "notes": [
+        "`less --help` shows pager-specific keys and options.",
+        "ANSI-preserving workflows can be used for colorized command output where supported."
+      ],
+      "see_also": [
+        "GREP",
+        "Applets"
+      ],
+      "aliases": [],
+      "language": "bash"
+    },
+    {
+      "name": "RM",
+      "category": "Portable applets",
+      "summary": "Remove files and links.",
+      "syntax": [
+        "rm FILE...",
+        "rm -r DIRECTORY..."
+      ],
+      "example": "rm old-link",
+      "notes": [
+        "A symbolic link to a directory is removed as a link when the operand names the link itself.",
+        "Completion deliberately avoids appending `/` to a directory symlink for rm/unlink."
+      ],
+      "see_also": [
+        "Completion"
+      ],
+      "aliases": [],
+      "language": "bash"
+    }
+  ]
+}
+

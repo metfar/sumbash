@@ -2,7 +2,34 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.2.0a1` is the current compatibility-focused alpha line.
+Version `0.2.0a2` is the current compatibility-focused alpha line.
+
+## Navigable contextual help (0.2.0a2)
+
+`sumbash` now uses the reusable SUM help browser from `sumTUI`.  Help source remains editable Markdown and the packaged `.helpdb` database is generated from it.
+
+```text
+F1        open contextual help for the command/topic at the cursor
+Alt+H     same contextual help gesture
+F1        Contents while the browser is open
+F2        focus Topics
+F3        focus Search
+F4        focus the help text
+Esc       close Help
+```
+
+The interactive shortcuts preserve the command line that was being edited.  On GNU readline the cursor position is restored as well, so Help behaves like an overlay rather than replacing the pending command.  The explicit forms are also available:
+
+```bash
+help
+help cd
+help -i
+help -i grep
+```
+
+The default help theme is `DOS` to keep the classic two-pane Norton/4DOS-style visual separation; set `SUMBASH_HELP_THEME` to another SUM theme when desired.
+
+The editable corpus is `docs/sumbash-help.md`; regenerate the packaged database with `markdown2helpdb docs/sumbash-help.md src/sumbash/sumbash_help.helpdb`.
 
 Interactive startup now loads `~/.sumbashrc` and then `~/.autoexec` when
 those files exist.  `SUMBASH_STARTUP` may be set to an `os.pathsep`-separated

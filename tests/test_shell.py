@@ -412,10 +412,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.2.0a1';
+    assert shell.get('SUM_SHELL_VERSION')=='0.2.0a2';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.2.0a1';
+    assert env['SUM_SHELL_VERSION']=='0.2.0a2';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
@@ -624,3 +624,54 @@ def test_external_rm_removes_directory_symlink_not_target(tmp_path):
     assert not link.is_symlink();
     assert target.is_dir();
     assert (target/'keep.txt').read_text(encoding='utf-8')=='keep';
+
+
+def test_help_builtin_plain_index_and_topic():
+    shell=ShellRuntime();
+    index=shell.run_line("help",capture=True);
+    assert index.code==0;
+    assert "sumbash Help" in index.out;
+    assert "Command index" in index.out;
+    topic=shell.run_line("help cd",capture=True);
+    assert topic.code==0;
+    assert topic.out.startswith("CD\n==");
+    assert "cd [DIR]" in topic.out;
+
+
+def test_help_builtin_unknown_topic_is_error():
+    shell=ShellRuntime();
+    result=shell.run_line("help definitely-not-a-topic",capture=True);
+    assert result.code==1;
+    assert "no help topic matches" in result.err;
+
+
+def test_context_help_trigger_preserves_line_cursor_and_topic():
+    from sumbash.shell import _HELP_CURSOR_MARKER, _HELP_TRIGGER_PREFIX;
+    shell=ShellRuntime();
+    original="grep --color=auto TODO file";
+    point=2;
+    triggered=_HELP_TRIGGER_PREFIX+original[:point]+_HELP_CURSOR_MARKER+original[point:];
+    restored,restored_point,topic=shell._decode_help_trigger(triggered);
+    assert restored==original;
+    assert restored_point==point;
+    assert topic=="GREP";
+
+
+def test_context_help_prefers_command_when_cursor_is_on_option():
+    shell=ShellRuntime();
+    line="df -h";
+    assert shell._context_help_topic(line,len(line))=="DF";
+
+
+def test_readline_restore_hook_inserts_saved_buffer_at_saved_point():
+    class FakeReadline:
+        def __init__(self): self.inserted=""; self.redisplayed=False;
+        def insert_text(self,text): self.inserted+=text;
+        def redisplay(self): self.redisplayed=True;
+    shell=ShellRuntime(); fake=FakeReadline(); shell._readline=fake; shell._pending_readline_restore=("echo RESTORED",8);
+    points=[]; shell._set_readline_point=lambda point: points.append(point) or True;
+    shell._readline_pre_input_hook();
+    assert fake.inserted=="echo RESTORED";
+    assert points==[8];
+    assert fake.redisplayed is True;
+    assert shell._pending_readline_restore is None;

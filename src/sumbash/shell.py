@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.2.0a1.
+"""Small portable shell core for sumbash 0.2.0a2.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -21,6 +21,7 @@ Broader compound grammar (if/while/functions/associative arrays) is scheduled fo
 from __future__ import annotations;
 
 from dataclasses import dataclass;
+from importlib.resources import files as resource_files;
 from datetime import datetime;
 import difflib;
 import fnmatch;
@@ -46,6 +47,8 @@ from sumio import open_resource;
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$");
 _ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S);
 _OPERATORS = ("2>&1", "1>&2", "2>>", "1>>", "2>", "1>", "0<", "&&", "||", ">>", "|", ";", ">", "<");
+_HELP_TRIGGER_PREFIX="__sum_help__ ";
+_HELP_CURSOR_MARKER="__SUM_HELP_POINT_4F6D2E__";
 
 
 class ShellWord(str):
@@ -151,6 +154,9 @@ class ShellRuntime:
         self._history_loaded = False;
         self._history_file = None;
         self._readline_auto_history_disabled = False;
+        self._pending_readline_restore = None;
+        self._readline_library = None;
+        self._help_corpus_cache = None;
         self._startup_loaded = False;
         self.completion_specs = {};
         self._completion_engine = CompletionEngine(self);
@@ -226,7 +232,7 @@ class ShellRuntime:
         return shutil.which(name, path=self.vars.get("PATH", os.environ.get("PATH","")));
 
     def _builtin_names(self):
-        return {"cd","export","global","unset","readonly","set","shopt","alias","unalias","command","type","source",".","eval","read","inkey","history","complete","compgen","compopt","exit","logout","true","false","let","local","declare","return","break","continue","shift","trap","umask",":"};
+        return {"cd","export","global","unset","readonly","set","shopt","alias","unalias","command","type","source",".","eval","read","inkey","history","complete","compgen","compopt","help","exit","logout","true","false","let","local","declare","return","break","continue","shift","trap","umask",":"};
 
     # ---------- expansion ----------
     def _subscript_key(self, expr):
@@ -819,6 +825,7 @@ class ShellRuntime:
         if name=="shopt": return self._bi_shopt(args);
         if name=="set": return self._bi_set(args);
         if name=="history": return self._bi_history(args);
+        if name=="help": return self._bi_help(args);
         if name=="complete": return self._bi_complete(args);
         if name=="compgen": return self._bi_compgen(args);
         if name=="compopt": return self._bi_compopt(args);
@@ -1028,6 +1035,151 @@ class ShellRuntime:
             self.shell_options["xtrace"]=(args[0]=="-x"); return Execution();
         return Execution(2,err="set: unsupported option\n");
 
+    def _help_corpus(self):
+        if self._help_corpus_cache is not None: return self._help_corpus_cache;
+        from sumtui.helpdb import HelpCorpus;
+        source=resource_files("sumbash").joinpath("sumbash_help.helpdb").read_text(encoding="utf-8");
+        self._help_corpus_cache=HelpCorpus.from_helpdb(source);
+        return self._help_corpus_cache;
+
+    @staticmethod
+    def _help_topic_text(topic):
+        lines=[topic.name, "="*len(topic.name), "", topic.summary, ""];
+        if topic.syntax:
+            lines.extend(["Syntax:"]+['  '+value for value in topic.syntax]+[""]);
+        if topic.notes:
+            lines.extend(["Notes:"]+['  - '+value for value in topic.notes]+[""]);
+        if topic.example:
+            lines.extend(["Example:"]+['  '+value for value in topic.example.rstrip().splitlines()]+[""]);
+        if topic.see_also: lines.extend(["See also: "+", ".join(topic.see_also),""]);
+        if topic.aliases: lines.extend(["Aliases: "+", ".join(topic.aliases),""]);
+        return "\n".join(lines).rstrip()+"\n";
+
+    def _help_plain(self,name=None):
+        corpus=self._help_corpus();
+        if name:
+            topic=corpus.find_topic(name);
+            if topic is None: return None;
+            return self._help_topic_text(topic);
+        lines=[corpus.title,"="*len(corpus.title),""];
+        if corpus.intro: lines.extend([corpus.intro,""]);
+        category=None;
+        for topic in sorted(corpus.topics,key=lambda item:(item.category.casefold(),item.name.casefold())):
+            if topic.category!=category:
+                category=topic.category; lines.extend([category+":"]);
+            lines.append("  {:20s} {}".format(topic.name,topic.summary));
+        lines.extend(["","Use `help TOPIC` for text help or `help -i [TOPIC]` for the navigable browser.",""]);
+        return "\n".join(lines);
+
+    def _open_help_browser(self,name=None,query=""):
+        corpus=self._help_corpus();
+        topic=corpus.find_topic(name) if name else None;
+        initial_query=str(query or "");
+        if name and topic is None and not initial_query: initial_query=str(name);
+        try:
+            from sumtui.helpbrowser import run_help_browser;
+            theme=self.get("SUMBASH_HELP_THEME") or "DOS";
+            return int(run_help_browser(corpus,title="sumbash Help",topic=topic.name if topic else None,query=initial_query,theme=theme) or 0);
+        except (ImportError,ModuleNotFoundError,RuntimeError) as exc:
+            text=self._help_plain(topic.name if topic else name);
+            if text: sys.stdout.write(text); sys.stdout.flush(); return 0;
+            sys.stderr.write("sumbash: interactive help unavailable: {}\n".format(exc)); sys.stderr.flush(); return 1;
+
+    def _bi_help(self,args):
+        interactive=False; names=[];
+        for arg in args:
+            if arg in ("-i","--interactive"): interactive=True;
+            elif arg in ("-h","--help"):
+                return Execution(out="Usage: help [-i|--interactive] [TOPIC]\n");
+            else: names.append(arg);
+        name=" ".join(names).strip() or None;
+        if interactive:
+            if not (self._command_stdin_is_tty and self._command_stdout_is_tty and getattr(sys.stdin,"isatty",lambda:False)() and getattr(sys.stdout,"isatty",lambda:False)()):
+                text=self._help_plain(name);
+                if text is None: return Execution(1,err="help: no help topic matches {}\n".format(name));
+                return Execution(out=text);
+            return Execution(self._open_help_browser(name));
+        text=self._help_plain(name);
+        if text is None: return Execution(1,err="help: no help topic matches {}\n".format(name));
+        return Execution(out=text);
+
+    @staticmethod
+    def _help_word_at(line,point):
+        text=str(line or ""); point=max(0,min(len(text),int(point)));
+        spans=list(re.finditer(r"[^\s;|&<>()]+",text));
+        for match in spans:
+            if match.start()<=point<=match.end(): return match.group(0);
+        before=[match for match in spans if match.end()<=point];
+        return before[-1].group(0) if before else "";
+
+    def _context_help_topic(self,line,point):
+        corpus=self._help_corpus(); text=str(line or ""); point=max(0,min(len(text),int(point)));
+        token=self._help_word_at(text,point).strip("\"'");
+        token=token.replace("\\ "," ");
+        candidates=[];
+        if token and not token.startswith("-"): candidates.append(token);
+        left=text[:point]; segment=re.split(r"(?:&&|\|\||[;|])",left)[-1].strip();
+        try:
+            words=self.tokenize(segment);
+        except ValueError:
+            words=[];
+        command="";
+        for word in words:
+            value=str(word);
+            if _ASSIGN_RE.match(value): continue;
+            command=value; break;
+        if not command:
+            match=re.match(r"\s*([^\s]+)",segment);
+            command=match.group(1) if match else "";
+        if command: candidates.append(command.strip("\"'"));
+        for candidate in candidates:
+            topic=corpus.find_topic(candidate);
+            if topic is not None: return topic.name;
+        return command or token or None;
+
+    def _decode_help_trigger(self,line):
+        text=str(line or "");
+        if not text.startswith(_HELP_TRIGGER_PREFIX): return None;
+        payload=text[len(_HELP_TRIGGER_PREFIX):]; point=payload.find(_HELP_CURSOR_MARKER);
+        if point<0: point=len(payload); original=payload;
+        else: original=payload[:point]+payload[point+len(_HELP_CURSOR_MARKER):];
+        topic=self._context_help_topic(original,point);
+        return original,point,topic;
+
+    def _set_readline_point(self,point):
+        if self._readline is None: return False;
+        try:
+            if self._readline_library is None:
+                import ctypes;
+                import ctypes.util;
+                name=ctypes.util.find_library("readline");
+                if not name: return False;
+                self._readline_library=ctypes.CDLL(name);
+            import ctypes;
+            value=ctypes.c_int.in_dll(self._readline_library,"rl_point");
+            value.value=max(0,int(point));
+            return True;
+        except Exception:
+            return False;
+
+    def _readline_pre_input_hook(self):
+        pending=self._pending_readline_restore;
+        if pending is None or self._readline is None: return;
+        self._pending_readline_restore=None; text,point=pending;
+        try:
+            self._readline.insert_text(text);
+            self._set_readline_point(point);
+            self._readline.redisplay();
+        except Exception: pass;
+
+    def _bind_help_keys(self,readline):
+        macro='"{}\\C-a{}\\C-m"'.format(_HELP_CURSOR_MARKER,_HELP_TRIGGER_PREFIX);
+        for key in (r'\eOP',r'\e[11~',r'\e[[A',r'\eh',r'\eH'):
+            try: readline.parse_and_bind('"{}": {}'.format(key,macro));
+            except Exception: pass;
+        try: readline.set_pre_input_hook(self._readline_pre_input_hook);
+        except Exception: pass;
+
     def _history_limit(self):
         try: return max(0,int(self.get("HISTSIZE") or 1000));
         except ValueError: return 1000;
@@ -1059,6 +1211,7 @@ class ShellRuntime:
             # Keep path punctuation inside the current word; separators still break commands.
             readline.set_completer_delims(" \t\n;|&<>()");
             readline.set_completer(self._completion_engine.readline_completer);
+            self._bind_help_keys(readline);
             # Python's input() normally lets readline add every accepted line to
             # history automatically.  Disable that so sumbash alone decides which
             # *user command lines* are history-worthy (HISTCONTROL included).
@@ -1573,6 +1726,12 @@ class ShellRuntime:
             while True:
                 try:
                     line=input(self.prompt());
+                    request=self._decode_help_trigger(line);
+                    if request is not None:
+                        original,point,topic=request;
+                        self._open_help_browser(topic);
+                        self._pending_readline_restore=(original,point);
+                        continue;
                     self.run_line(line,capture=False,record_history=True);
                 except EOFError:
                     # Ctrl-D on an empty interactive prompt is shell EOF: exit/logout.
