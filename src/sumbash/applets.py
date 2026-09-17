@@ -749,22 +749,69 @@ def app_find(argv, stdin="", runtime=None):
 
 
 def app_grep(argv, stdin="", runtime=None):
-    ignore=False; invert=False; number=False; quiet=False; recursive=False; patterns=[]; files=[]; i=0;
-    while i<len(argv):
-        a=argv[i];
-        if a in ("-i","--ignore-case"): ignore=True; i+=1; continue;
-        if a in ("-v","--invert-match"): invert=True; i+=1; continue;
-        if a in ("-n","--line-number"): number=True; i+=1; continue;
-        if a in ("-q","--quiet"): quiet=True; i+=1; continue;
-        if a in ("-r","-R","--recursive"): recursive=True; i+=1; continue;
-        if a in ("-e","--regexp") and i+1<len(argv): patterns.append(argv[i+1]); i+=2; continue;
-        if not patterns: patterns.append(a);
-        else: files.append(a);
-        i+=1;
-    if not patterns: return AppletResult(2,err="grep: missing pattern\n");
-    flags=re.IGNORECASE if ignore else 0;
-    try: regs=[re.compile(p,flags) for p in patterns];
-    except re.error as exc: return AppletResult(2,err="grep: {}\n".format(exc));
+    args=list(argv); ignore=False; invert=False; number=False; quiet=False; recursive=False; fixed=False; extended=False; patterns=[]; files=[]; before=0; after=0; color="never"; i=0; operands=[];
+    output_tty=getattr(runtime,"_command_stdout_is_tty",None) if runtime is not None else None;
+    if output_tty is None:
+        try: output_tty=sys.stdout.isatty();
+        except Exception: output_tty=False;
+    def need(opt):
+        nonlocal i;
+        if i+1>=len(args): raise ValueError("grep: option requires an argument -- '{}'".format(opt));
+        i+=1; return args[i];
+    try:
+        while i<len(args):
+            a=args[i];
+            if a=="--": operands.extend(args[i+1:]); break;
+            if a.startswith("--"):
+                key,val=(a[2:].split("=",1)+[None])[:2] if "=" in a else (a[2:],None);
+                if key=="ignore-case": ignore=True;
+                elif key=="invert-match": invert=True;
+                elif key=="line-number": number=True;
+                elif key=="quiet": quiet=True;
+                elif key in ("recursive","dereference-recursive"): recursive=True;
+                elif key=="extended-regexp": extended=True; fixed=False;
+                elif key=="fixed-strings": fixed=True; extended=False;
+                elif key=="regexp": patterns.append(val if val is not None else need("e"));
+                elif key=="after-context": after=max(0,int(val if val is not None else need("A")));
+                elif key=="before-context": before=max(0,int(val if val is not None else need("B")));
+                elif key=="context": before=after=max(0,int(val if val is not None else need("C")));
+                elif key in ("color","colour"):
+                    color=(val or "always").lower();
+                    if color not in ("always","auto","never"): return AppletResult(2,err="grep: invalid argument '{}' for '--color'\n".format(color));
+                else: return AppletResult(2,err="grep: unrecognized option '--{}'\n".format(key));
+                i+=1; continue;
+            if a.startswith("-") and a!="-":
+                cluster=a[1:]; j=0;
+                while j<len(cluster):
+                    ch=cluster[j];
+                    if ch in ("e","A","B","C"):
+                        value=cluster[j+1:] if j+1<len(cluster) else need(ch);
+                        if ch=="e": patterns.append(value);
+                        elif ch=="A": after=max(0,int(value));
+                        elif ch=="B": before=max(0,int(value));
+                        else: before=after=max(0,int(value));
+                        j=len(cluster); continue;
+                    if ch=="i": ignore=True;
+                    elif ch=="v": invert=True;
+                    elif ch=="n": number=True;
+                    elif ch=="q": quiet=True;
+                    elif ch in ("r","R"): recursive=True;
+                    elif ch=="E": extended=True; fixed=False;
+                    elif ch=="F": fixed=True; extended=False;
+                    else: return AppletResult(2,err="grep: invalid option -- '{}'\n".format(ch));
+                    j+=1;
+                i+=1; continue;
+            operands.append(a); i+=1;
+    except (ValueError,TypeError) as exc:
+        return AppletResult(2,err=str(exc)+"\n");
+    if not patterns:
+        if not operands: return AppletResult(2,err="grep: missing pattern\n");
+        patterns.append(operands.pop(0));
+    files=operands;
+    flags=re.IGNORECASE if ignore else 0; regs=[];
+    if not fixed:
+        try: regs=[re.compile(p,flags) for p in patterns];
+        except re.error as exc: return AppletResult(2,err="grep: {}\n".format(exc));
     inputs=[];
     if recursive and files:
         for raw in files:
@@ -772,30 +819,65 @@ def app_grep(argv, stdin="", runtime=None):
             if p.is_dir(): inputs.extend(str(x) for x in p.rglob("*") if x.is_file());
             else: inputs.append(raw);
     else: inputs=files;
-    found=False; out=[]; err=[];
+    use_color=color=="always" or (color=="auto" and bool(output_tty));
+    def is_match(line):
+        probe=line.casefold() if ignore else line;
+        if fixed:
+            values=[p.casefold() if ignore else p for p in patterns]; return any(p in probe for p in values);
+        return any(r.search(line) for r in regs);
+    def paint(line):
+        if not use_color or invert: return line;
+        start="\x1b[01;31m"; stop="\x1b[m";
+        if fixed:
+            out=line;
+            for pat in patterns:
+                if not pat: continue;
+                rx=re.compile(re.escape(pat),flags); out=rx.sub(lambda m:start+m.group(0)+stop,out);
+            return out;
+        out=line;
+        for reg in regs: out=reg.sub(lambda m:start+m.group(0)+stop,out);
+        return out;
+    found=False; out=[]; err=[]; any_error=False; first_group=True;
     for name,value in _read_paths(inputs,stdin,runtime):
-        if isinstance(value,Exception): err.append("grep: {}: {}\n".format(name,value)); continue;
-        for lno,line in enumerate(value.splitlines(),1):
-            hit=any(r.search(line) for r in regs); hit = not hit if invert else hit;
-            if hit:
-                found=True;
-                if quiet: return AppletResult(0);
-                prefix="";
-                if len(inputs)>1: prefix += name+":";
-                if number: prefix += str(lno)+":";
-                out.append(prefix+line+"\n");
-    return AppletResult(0 if found else 1,"".join(out),"".join(err));
+        if isinstance(value,Exception): err.append("grep: {}: {}\n".format(name,value)); any_error=True; continue;
+        lines=value.splitlines(); hits=[];
+        for idx,line in enumerate(lines):
+            hit=is_match(line); hit=not hit if invert else hit;
+            if hit: hits.append(idx);
+        if hits:
+            found=True;
+            if quiet: return AppletResult(0);
+        selected={};
+        for idx in hits:
+            lo=max(0,idx-before); hi=min(len(lines)-1,idx+after);
+            for pos in range(lo,hi+1): selected[pos]=(pos==idx) or selected.get(pos,False);
+        previous=None;
+        for pos in sorted(selected):
+            if previous is not None and pos>previous+1:
+                if not first_group: out.append("--\n");
+            first_group=False; previous=pos; match_line=selected[pos]; line=lines[pos]; prefix="";
+            sep=":" if match_line else "-";
+            if len(inputs)>1 or recursive: prefix += name+sep;
+            if number: prefix += str(pos+1)+sep;
+            out.append(prefix+(paint(line) if match_line else line)+"\n");
+    return AppletResult(2 if any_error and not found else (0 if found else (2 if any_error else 1)),"".join(out),"".join(err));
 
+
+def app_egrep(argv, stdin="", runtime=None): return app_grep(["-E"]+list(argv),stdin=stdin,runtime=runtime);
+def app_fgrep(argv, stdin="", runtime=None): return app_grep(["-F"]+list(argv),stdin=stdin,runtime=runtime);
 
 def app_cut(argv, stdin="", runtime=None):
     fields=None; delim="\t"; chars=None; files=[]; i=0;
     while i<len(argv):
         a=argv[i];
+        if a=="--": files.extend(argv[i+1:]); break;
         if a in ("-f","--fields") and i+1<len(argv): fields=argv[i+1]; i+=2; continue;
         if a.startswith("-f") and len(a)>2: fields=a[2:]; i+=1; continue;
         if a in ("-d","--delimiter") and i+1<len(argv): delim=argv[i+1]; i+=2; continue;
         if a.startswith("-d") and len(a)>2: delim=a[2:]; i+=1; continue;
         if a in ("-c","--characters") and i+1<len(argv): chars=argv[i+1]; i+=2; continue;
+        if a.startswith("-c") and len(a)>2: chars=a[2:]; i+=1; continue;
+        if a.startswith("-") and a!="-": return AppletResult(1,err="cut: invalid option -- '{}'\n".format(a[1:]));
         files.append(a); i+=1;
     def indexes(spec):
         result=[];
@@ -842,52 +924,116 @@ def app_sed(argv, stdin="", runtime=None):
 
 
 def app_head(argv, stdin="", runtime=None):
-    n=10; files=[]; i=0;
-    while i<len(argv):
-        if argv[i] in ("-n","--lines") and i+1<len(argv): n=int(argv[i+1]); i+=2; continue;
-        if argv[i].startswith("-") and argv[i][1:].isdigit(): n=int(argv[i][1:]); i+=1; continue;
-        files.append(argv[i]); i+=1;
+    n=10; files=[]; args=list(argv); i=0;
+    while i<len(args):
+        a=args[i];
+        if a=="--": files.extend(args[i+1:]); break;
+        if a in ("-n","--lines"):
+            if i+1>=len(args): return AppletResult(1,err="head: option requires an argument -- 'n'\n");
+            try: n=int(args[i+1]);
+            except ValueError: return AppletResult(1,err="head: invalid number of lines: '{}'\n".format(args[i+1]));
+            i+=2; continue;
+        if a.startswith("--lines="):
+            try: n=int(a.split("=",1)[1]);
+            except ValueError: return AppletResult(1,err="head: invalid number of lines\n");
+            i+=1; continue;
+        if a.startswith("-n") and len(a)>2:
+            try: n=int(a[2:]);
+            except ValueError: return AppletResult(1,err="head: invalid number of lines: '{}'\n".format(a[2:]));
+            i+=1; continue;
+        if a.startswith("-") and a[1:].isdigit(): n=int(a[1:]); i+=1; continue;
+        if a.startswith("-") and a!="-": return AppletResult(1,err="head: invalid option -- '{}'\n".format(a[1:]));
+        files.append(a); i+=1;
     out=[]; err=[]; code=0;
     for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("head: {}: {}\n".format(name,value)); code=1;
         else: out.extend(value.splitlines(True)[:n]);
     return AppletResult(code,"".join(out),"".join(err));
 
-
 def app_tail(argv, stdin="", runtime=None):
-    n=10; files=[]; i=0;
-    while i<len(argv):
-        if argv[i] in ("-n","--lines") and i+1<len(argv): n=int(argv[i+1]); i+=2; continue;
-        if argv[i].startswith("-") and argv[i][1:].isdigit(): n=int(argv[i][1:]); i+=1; continue;
-        files.append(argv[i]); i+=1;
+    n=10; files=[]; args=list(argv); i=0;
+    while i<len(args):
+        a=args[i];
+        if a=="--": files.extend(args[i+1:]); break;
+        if a in ("-n","--lines"):
+            if i+1>=len(args): return AppletResult(1,err="tail: option requires an argument -- 'n'\n");
+            try: n=int(args[i+1]);
+            except ValueError: return AppletResult(1,err="tail: invalid number of lines: '{}'\n".format(args[i+1]));
+            i+=2; continue;
+        if a.startswith("--lines="):
+            try: n=int(a.split("=",1)[1]);
+            except ValueError: return AppletResult(1,err="tail: invalid number of lines\n");
+            i+=1; continue;
+        if a.startswith("-n") and len(a)>2:
+            try: n=int(a[2:]);
+            except ValueError: return AppletResult(1,err="tail: invalid number of lines: '{}'\n".format(a[2:]));
+            i+=1; continue;
+        if a.startswith("-") and a[1:].isdigit(): n=int(a[1:]); i+=1; continue;
+        if a.startswith("-") and a!="-": return AppletResult(1,err="tail: invalid option -- '{}'\n".format(a[1:]));
+        files.append(a); i+=1;
     out=[]; err=[]; code=0;
     for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("tail: {}: {}\n".format(name,value)); code=1;
         else: out.extend(value.splitlines(True)[-n:]);
     return AppletResult(code,"".join(out),"".join(err));
 
-
 def app_sort(argv, stdin="", runtime=None):
-    reverse="-r" in argv; numeric="-n" in argv; unique="-u" in argv; files=[a for a in argv if not a.startswith("-")]; lines=[]; err=[];
+    reverse=False; numeric=False; unique=False; files=[]; args=list(argv); i=0;
+    while i<len(args):
+        a=args[i];
+        if a=="--": files.extend(args[i+1:]); break;
+        if a.startswith("--"):
+            if a=="--reverse": reverse=True;
+            elif a=="--numeric-sort": numeric=True;
+            elif a=="--unique": unique=True;
+            else: return AppletResult(2,err="sort: unrecognized option '{}'\n".format(a));
+            i+=1; continue;
+        if a.startswith("-") and a!="-":
+            for ch in a[1:]:
+                if ch=="r": reverse=True;
+                elif ch=="n": numeric=True;
+                elif ch=="u": unique=True;
+                else: return AppletResult(2,err="sort: invalid option -- '{}'\n".format(ch));
+            i+=1; continue;
+        files.append(a); i+=1;
+    lines=[]; err=[]; code=0;
     for name,value in _read_paths(files,stdin,runtime):
-        if isinstance(value,Exception): err.append("sort: {}: {}\n".format(name,value)); continue;
+        if isinstance(value,Exception): err.append("sort: {}: {}\n".format(name,value)); code=1; continue;
         lines.extend(value.splitlines());
     key=(lambda x: float(x.strip() or 0)) if numeric else None;
     try: lines.sort(key=key,reverse=reverse);
     except ValueError: return AppletResult(2,err="sort: non-numeric input\n");
     if unique: lines=list(dict.fromkeys(lines));
-    return AppletResult(0,"".join(x+"\n" for x in lines),"".join(err));
-
+    return AppletResult(code,"".join(x+"\n" for x in lines),"".join(err));
 
 def app_uniq(argv, stdin="", runtime=None):
-    count="-c" in argv; files=[a for a in argv if not a.startswith("-")]; data=_read_paths(files,stdin,runtime); out=[]; err=[]; code=0;
-    lines=[];
+    count=False; only_dup=False; only_unique=False; files=[]; args=list(argv); i=0;
+    while i<len(args):
+        a=args[i];
+        if a=="--": files.extend(args[i+1:]); break;
+        if a.startswith("--"):
+            if a=="--count": count=True;
+            elif a=="--repeated": only_dup=True;
+            elif a=="--unique": only_unique=True;
+            else: return AppletResult(1,err="uniq: unrecognized option '{}'\n".format(a));
+            i+=1; continue;
+        if a.startswith("-") and a!="-":
+            for ch in a[1:]:
+                if ch=="c": count=True;
+                elif ch=="d": only_dup=True;
+                elif ch=="u": only_unique=True;
+                else: return AppletResult(1,err="uniq: invalid option -- '{}'\n".format(ch));
+            i+=1; continue;
+        files.append(a); i+=1;
+    data=_read_paths(files,stdin,runtime); out=[]; err=[]; code=0; lines=[];
     for name,value in data:
         if isinstance(value,Exception): err.append("uniq: {}: {}\n".format(name,value)); code=1;
         else: lines.extend(value.splitlines());
     last=None; n=0;
     def emit(v,c):
         if v is None: return;
+        if only_dup and c<2: return;
+        if only_unique and c!=1: return;
         out.append(("{:7d} ".format(c) if count else "")+v+"\n");
     for line in lines:
         if line==last: n+=1;
@@ -895,10 +1041,28 @@ def app_uniq(argv, stdin="", runtime=None):
     emit(last,n);
     return AppletResult(code,"".join(out),"".join(err));
 
-
 def app_wc(argv, stdin="", runtime=None):
-    want_l="-l" in argv; want_w="-w" in argv; want_c="-c" in argv; files=[a for a in argv if not a.startswith("-")];
-    if not (want_l or want_w or want_c): want_l=want_w=want_c=True;
+    want_l=False; want_w=False; want_c=False; want_m=False; files=[]; args=list(argv); i=0;
+    while i<len(args):
+        a=args[i];
+        if a=="--": files.extend(args[i+1:]); break;
+        if a.startswith("--"):
+            if a=="--lines": want_l=True;
+            elif a=="--words": want_w=True;
+            elif a=="--bytes": want_c=True;
+            elif a=="--chars": want_m=True;
+            else: return AppletResult(1,err="wc: unrecognized option '{}'\n".format(a));
+            i+=1; continue;
+        if a.startswith("-") and a!="-":
+            for ch in a[1:]:
+                if ch=="l": want_l=True;
+                elif ch=="w": want_w=True;
+                elif ch=="c": want_c=True;
+                elif ch=="m": want_m=True;
+                else: return AppletResult(1,err="wc: invalid option -- '{}'\n".format(ch));
+            i+=1; continue;
+        files.append(a); i+=1;
+    if not (want_l or want_w or want_c or want_m): want_l=want_w=want_c=True;
     out=[]; err=[]; code=0;
     for name,value in _read_paths(files,stdin,runtime):
         if isinstance(value,Exception): err.append("wc: {}: {}\n".format(name,value)); code=1; continue;
@@ -906,9 +1070,9 @@ def app_wc(argv, stdin="", runtime=None):
         if want_l: vals.append(str(len(value.splitlines())));
         if want_w: vals.append(str(len(value.split())));
         if want_c: vals.append(str(len(value.encode("utf-8"))));
+        if want_m: vals.append(str(len(value)));
         out.append(" ".join(vals)+(" "+name if files else "")+"\n");
     return AppletResult(code,"".join(out),"".join(err));
-
 
 def app_tee(argv, stdin="", runtime=None):
     append=False; files=[];
@@ -1478,22 +1642,93 @@ def app_test(argv, stdin="", runtime=None):
 
 def app_df(argv,stdin="",runtime=None):
     if runtime is None or not hasattr(runtime,"fsa"): return AppletResult(1,err="df: sumFSA unavailable\n");
-    human="-h" in argv or "--human-readable" in argv; rows=["Filesystem       Size       Used      Avail  Mounted on"];
-    for volume in runtime.fsa.volumes():
-        total=volume.total_bytes; free=volume.free_bytes; used=None if total is None or free is None else total-free;
+    human=False; show_all=False; print_type=False; paths=[]; args=list(argv); i=0;
+    while i<len(args):
+        arg=args[i];
+        if arg=="--": paths.extend(args[i+1:]); break;
+        if arg in ("-h","--human-readable"): human=True; i+=1; continue;
+        if arg in ("-a","--all"): show_all=True; i+=1; continue;
+        if arg in ("-T","--print-type"): print_type=True; i+=1; continue;
+        if arg.startswith("-") and not arg.startswith("--") and len(arg)>2:
+            bad=None;
+            for ch in arg[1:]:
+                if ch=="a": show_all=True;
+                elif ch=="h": human=True;
+                elif ch=="T": print_type=True;
+                else: bad=ch; break;
+            if bad is not None: return AppletResult(2,err="df: invalid option -- '{}'\n".format(bad));
+            i+=1; continue;
+        if arg in ("--help",):
+            return AppletResult(out="Usage: df [OPTION]... [FILE]...\n  -a, --all             include normally hidden filesystems\n  -h, --human-readable  print sizes in powers of 1024\n  -T, --print-type      print filesystem type\n");
+        if arg.startswith("-") and arg!="-": return AppletResult(2,err="df: unrecognized option '{}'\n".format(arg));
+        paths.append(arg); i+=1;
+    hidden_types={"proc","sysfs","devtmpfs","devpts","cgroup","cgroup2","pstore","securityfs","debugfs","tracefs","configfs","fusectl","mqueue","hugetlbfs","autofs","binfmt_misc"};
+    mounts=list(runtime.fsa.mounts());
+    if paths:
+        selected=[];
+        for raw in paths:
+            try: target=Path(runtime.fsa.native_path(raw,cwd=getattr(runtime,"logical_cwd",runtime.fsa.cwd))).resolve();
+            except Exception: target=_runtime_path(raw,runtime).resolve();
+            candidates=[];
+            for mount in mounts:
+                try:
+                    root=Path(mount.native_root).resolve();
+                    target.relative_to(root); candidates.append((len(root.parts),mount));
+                except (OSError,ValueError): pass;
+            if candidates: selected.append(max(candidates,key=lambda item:item[0])[1]);
+        mounts=selected;
+    # GNU df suppresses duplicate mount entries by default.  Use the native
+    # filesystem device id plus source to collapse bind mounts such as
+    # /proc/keys -> /dev and repeated virtiofs mounts, keeping the shortest
+    # visible mount point.  -a/--all deliberately disables this filtering.
+    candidates=[];
+    for mount in mounts:
+        source=mount.source or mount.native_root; root=mount.logical_root; fstype=mount.fs_type or "-";
+        is_snap=(fstype=="squashfs" and (str(root).startswith("/snap/") or str(source).startswith("/dev/loop")));
+        if not show_all and (fstype in hidden_types or is_snap): continue;
+        try: st_dev=os.stat(mount.native_root).st_dev;
+        except OSError: st_dev=None;
+        candidates.append((mount,source,root,fstype,st_dev));
+    if not show_all:
+        preferred={};
+        for item in candidates:
+            mount,source,root,fstype,st_dev=item; key=(str(source),st_dev);
+            old=preferred.get(key);
+            if old is None or (len(str(root)),str(root)) < (len(str(old[2])),str(old[2])): preferred[key]=item;
+        candidates=list(preferred.values());
+    rows=[]; seen=set();
+    for mount,source,root,fstype,unused_st_dev in candidates:
+        key=(source,root);
+        if key in seen: continue;
+        seen.add(key);
+        try: usage=shutil.disk_usage(mount.native_root); total=int(usage.total); free=int(usage.free); used=total-free;
+        except OSError: continue;
+        pct=0 if total<=0 else int(math.ceil((used*100.0)/total));
         if human:
-            size=_human_size(total) if total is not None else "?"; used_text=_human_size(used) if used is not None else "?"; free_text=_human_size(free) if free is not None else "?";
+            size=_human_size(total); used_text=_human_size(used); free_text=_human_size(free);
         else:
-            size=str(total if total is not None else "?"); used_text=str(used if used is not None else "?"); free_text=str(free if free is not None else "?");
-        rows.append("{:<12} {:>10} {:>10} {:>10}  {}".format(volume.source or volume.id,size,used_text,free_text,volume.logical_root));
-    return AppletResult(out="\n".join(rows)+"\n");
+            block=1024; size=str((total+block-1)//block); used_text=str((used+block-1)//block); free_text=str(free//block);
+        rows.append((str(source),str(fstype),size,used_text,free_text,"{}%".format(pct),str(root)));
+    if print_type:
+        widths=[len(x) for x in ("Filesystem","Type","Size","Used","Avail","Use%")];
+        for row in rows:
+            for idx in range(6): widths[idx]=max(widths[idx],len(row[idx]));
+        out=["{:<{}} {:<{}} {:>{}} {:>{}} {:>{}} {:>{}} Mounted on".format("Filesystem",widths[0],"Type",widths[1],"Size",widths[2],"Used",widths[3],"Avail",widths[4],"Use%",widths[5])];
+        for row in rows: out.append("{:<{}} {:<{}} {:>{}} {:>{}} {:>{}} {:>{}} {}".format(row[0],widths[0],row[1],widths[1],row[2],widths[2],row[3],widths[3],row[4],widths[4],row[5],widths[5],row[6]));
+    else:
+        widths=[len(x) for x in ("Filesystem","Size","Used","Avail","Use%")];
+        for row in rows:
+            for idx,val in enumerate((row[0],row[2],row[3],row[4],row[5])): widths[idx]=max(widths[idx],len(val));
+        out=["{:<{}} {:>{}} {:>{}} {:>{}} {:>{}} Mounted on".format("Filesystem",widths[0],"Size",widths[1],"Used",widths[2],"Avail",widths[3],"Use%",widths[4])];
+        for row in rows: out.append("{:<{}} {:>{}} {:>{}} {:>{}} {:>{}} {}".format(row[0],widths[0],row[2],widths[1],row[3],widths[2],row[4],widths[3],row[5],widths[4],row[6]));
+    return AppletResult(out="\n".join(out)+"\n");
 
 
 APPLETS = {
     "echo": app_echo, "printf": app_printf, "cat": app_cat, "rev": app_rev,
     "basename": app_basename, "dirname": app_dirname, "pwd": app_pwd, "realpath": app_realpath,
     "clear": app_clear, "sleep": app_sleep, "ls": app_ls, "find": app_find, "grep": app_grep,
-    "egrep": app_grep, "fgrep": app_grep, "cut": app_cut, "sed": app_sed, "head": app_head,
+    "egrep": app_egrep, "fgrep": app_fgrep, "cut": app_cut, "sed": app_sed, "head": app_head,
     "tail": app_tail, "sort": app_sort, "uniq": app_uniq, "wc": app_wc, "tee": app_tee,
     "date": app_date, "uptime": app_uptime, "uname": app_uname, "lsb_release": app_lsb_release,
     "hostname": app_hostname, "arch": app_arch, "whoami": app_whoami, "tty": app_tty, "df": app_df, "less": app_less, "suminfo": app_suminfo,

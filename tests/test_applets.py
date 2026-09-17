@@ -271,3 +271,95 @@ def test_cat_show_all_and_clustered_options():
     assert result.out=="a^Ib$\n";
     clustered=run_applet("cat",["-vET"],stdin="\x1b\t\n");
     assert clustered.out=="^[^I$\n";
+
+
+def test_grep_accepts_color_alias_and_pipeline(tmp_path):
+    shell=ShellRuntime(cwd=tmp_path);
+    shell.aliases['grep']='grep --color=auto';
+    shell._stdout_is_tty=True;
+    result=shell.run_line("printf 'alpha\\nrsync here\\n' | grep rsync",capture=True);
+    assert result.code==0;
+    import re;
+    assert re.sub(r'\x1b\[[0-9;]*m','',result.out)=='rsync here\n';
+    assert result.err=='';
+
+
+def test_grep_grouped_flags_context_fixed_and_unknown_option(tmp_path):
+    p=tmp_path/'sample.txt'; p.write_text('one\nNeedle\nthree\nfour\n',encoding='utf-8');
+    shell=ShellRuntime(cwd=tmp_path);
+    r=run_applet('grep',['-inA','1','needle','sample.txt'],runtime=shell);
+    assert r.code==0;
+    assert '2:Needle' in r.out;
+    assert '3-three' in r.out;
+    fixed=run_applet('fgrep',['a.b'],stdin='a.b\naxb\n',runtime=shell);
+    assert fixed.out=='a.b\n';
+    bad=run_applet('grep',['--definitely-not-an-option','x'],runtime=shell);
+    assert bad.code==2;
+    assert 'unrecognized option' in bad.err;
+
+
+def test_grep_color_always_marks_match_and_auto_is_pipeline_safe(tmp_path):
+    shell=ShellRuntime(cwd=tmp_path);
+    shell._command_stdout_is_tty=True;
+    forced=run_applet('grep',['--color=always','foo'],stdin='foo bar\n',runtime=shell);
+    assert '\x1b[01;31mfoo\x1b[m' in forced.out;
+    shell._command_stdout_is_tty=False;
+    auto=run_applet('grep',['--color=auto','foo'],stdin='foo bar\n',runtime=shell);
+    assert auto.out=='foo bar\n';
+
+
+def test_ls_paths_with_spaces_and_separate_operands(tmp_path):
+    parent=tmp_path/'parent'; parent.mkdir();
+    (parent/'VirtualBox').mkdir(); (parent/'VirtualBox VMs').mkdir();
+    (parent/'VirtualBox'/'a').write_text('a',encoding='utf-8');
+    (parent/'VirtualBox VMs'/'b').write_text('b',encoding='utf-8');
+    shell=ShellRuntime(cwd=parent);
+    result=shell.run_line(r'ls VirtualBox VirtualBox\ VMs',capture=True);
+    assert result.code==0;
+    assert 'VirtualBox:' in result.out;
+    assert 'VirtualBox VMs:' in result.out;
+    assert 'a' in result.out and 'b' in result.out;
+
+
+def test_df_human_has_use_percent_and_hides_snap_unless_all(monkeypatch,tmp_path):
+    from types import SimpleNamespace;
+    from sumbash.applets import app_df;
+    shell=ShellRuntime(cwd=tmp_path);
+    mounts=[
+        SimpleNamespace(source='/dev/root',native_root=str(tmp_path),logical_root='/',fs_type='ext4'),
+        SimpleNamespace(source='/dev/loop7',native_root=str(tmp_path),logical_root='/snap/demo/1',fs_type='squashfs'),
+        SimpleNamespace(source='tmpfs',native_root=str(tmp_path),logical_root='/run',fs_type='tmpfs'),
+    ];
+    monkeypatch.setattr(shell.fsa,'mounts',lambda: mounts);
+    monkeypatch.setattr('sumbash.applets.shutil.disk_usage',lambda p: SimpleNamespace(total=1024**3,free=512*1024**2));
+    normal=app_df(['-h'],runtime=shell);
+    assert normal.code==0;
+    assert 'Use%' in normal.out;
+    assert '/dev/root' in normal.out;
+    assert 'tmpfs' in normal.out;
+    assert '/dev/loop7' not in normal.out;
+    allfs=app_df(['-a','-h'],runtime=shell);
+    assert '/dev/loop7' in allfs.out;
+
+
+def test_common_applets_reject_unknown_options_and_accept_grouped_flags():
+    assert run_applet('cut',['--bad'],stdin='x\n').code!=0;
+    assert run_applet('head',['--bad'],stdin='x\n').code!=0;
+    assert run_applet('tail',['--bad'],stdin='x\n').code!=0;
+    assert run_applet('sort',['--bad'],stdin='x\n').code!=0;
+    assert run_applet('uniq',['--bad'],stdin='x\n').code!=0;
+    assert run_applet('wc',['--bad'],stdin='x\n').code!=0;
+    assert run_applet('sort',['-ru'],stdin='b\na\na\n').out=='b\na\n';
+    assert run_applet('wc',['-lw'],stdin='one two\n').out.strip()=='1 2';
+
+
+def test_df_grouped_options(monkeypatch,tmp_path):
+    from types import SimpleNamespace;
+    from sumbash.applets import app_df;
+    shell=ShellRuntime(cwd=tmp_path);
+    mounts=[SimpleNamespace(source='/dev/root',native_root=str(tmp_path),logical_root='/',fs_type='ext4')];
+    monkeypatch.setattr(shell.fsa,'mounts',lambda: mounts);
+    monkeypatch.setattr('sumbash.applets.shutil.disk_usage',lambda p: SimpleNamespace(total=1024**3,free=512*1024**2));
+    result=app_df(['-hT'],runtime=shell);
+    assert result.code==0;
+    assert 'Type' in result.out and 'ext4' in result.out;
