@@ -173,8 +173,15 @@ def app_dirname(argv, stdin="", runtime=None):
 
 
 def app_pwd(argv, stdin="", runtime=None):
-    if runtime is not None and hasattr(runtime,"logical_cwd"): return AppletResult(out=str(runtime.logical_cwd)+"\n");
-    physical="-P" in argv; cwd=Path(runtime.cwd if runtime is not None else os.getcwd()); value=str(cwd.resolve()) if physical else str(cwd); return AppletResult(out=value+"\n");
+    physical=False;
+    for item in argv:
+        if item=="-P": physical=True;
+        elif item=="-L": physical=False;
+        elif item=="--": continue;
+        elif item.startswith("-"): return AppletResult(2,err="pwd: {}: invalid option\n".format(item));
+    if runtime is not None and hasattr(runtime,"logical_cwd"):
+        value=str(runtime.cwd) if physical else str(runtime.logical_cwd); return AppletResult(out=value+"\n");
+    cwd=Path(runtime.cwd if runtime is not None else os.getcwd()); value=str(cwd.resolve()) if physical else str(cwd); return AppletResult(out=value+"\n");
 
 
 def app_realpath(argv, stdin="", runtime=None):

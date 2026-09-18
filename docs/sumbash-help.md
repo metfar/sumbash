@@ -144,14 +144,16 @@ Change the current directory.
 #### Syntax
 
 ```bash
-cd [DIR]
-cd -
+cd [-L|-P] [DIR]
+cd [-L|-P] -
 ```
 
 #### Notes
 
 - Without DIR, CD uses HOME.
-- `cd -` returns to OLDPWD and prints the resulting directory.
+- `cd` uses logical (`-L`) navigation by default and preserves symlink components in PWD.
+- `cd -P` resolves symlinks and uses the physical filesystem path.
+- `cd -` returns to OLDPWD and prints the resulting logical directory.
 - `shopt -s cdspell` enables a conservative spelling correction when exactly one close directory match exists.
 
 #### Functional example
@@ -183,7 +185,8 @@ pwd -P
 
 #### Notes
 
-- `pwd -P` resolves the physical filesystem path.
+- `pwd` and `pwd -L` print the logical path preserved by the shell.
+- `pwd -P` prints the resolved physical filesystem path.
 - Logical path handling is provided through sumFSA.
 
 #### Functional example

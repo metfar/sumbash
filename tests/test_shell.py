@@ -35,6 +35,56 @@ def test_cdspell_and_physical_pwd(tmp_path):
     assert result.out.strip()==str((tmp_path/"projects").resolve());
 
 
+def test_cd_preserves_symlink_logically_and_pwd_physical(tmp_path):
+    home=tmp_path/"home"; home.mkdir();
+    physical_root=tmp_path/"opt"; physical_root.mkdir();
+    project=physical_root/"project"; project.mkdir();
+    link=home/"sum"; link.symlink_to(project,target_is_directory=True);
+    shell=ShellRuntime(env={"HOME":str(home),"PATH":""},cwd=home);
+    result=shell.run_line("cd ~/sum; pwd",capture=True);
+    assert result.code==0;
+    assert result.out.strip()==str(link);
+    assert shell.get("PWD")==str(link);
+    assert shell.logical_cwd==str(link);
+    assert shell.cwd==str(project.resolve());
+    assert shell.run_line("pwd -P",capture=True).out.strip()==str(project.resolve());
+
+
+def test_cd_logical_parent_differs_from_physical_parent(tmp_path):
+    home=tmp_path/"home"; home.mkdir();
+    physical_root=tmp_path/"opt"; physical_root.mkdir();
+    project=physical_root/"project"; project.mkdir();
+    (home/"sum").symlink_to(project,target_is_directory=True);
+    shell=ShellRuntime(env={"HOME":str(home),"PATH":""},cwd=home);
+    assert shell.run_line("cd sum; cd ..; pwd",capture=True).out.strip()==str(home);
+    assert shell.run_line("cd sum; cd -P ..; pwd",capture=True).out.strip()==str(physical_root.resolve());
+    assert shell.run_line("pwd -P",capture=True).out.strip()==str(physical_root.resolve());
+
+
+def test_cd_explicit_L_and_P_and_oldpwd_keep_logical_path(tmp_path):
+    home=tmp_path/"home"; home.mkdir();
+    physical_root=tmp_path/"opt"; physical_root.mkdir();
+    project=physical_root/"project"; project.mkdir();
+    link=home/"sum"; link.symlink_to(project,target_is_directory=True);
+    shell=ShellRuntime(env={"HOME":str(home),"PATH":""},cwd=home);
+    assert shell.run_line("cd -L sum; pwd -L",capture=True).out.strip()==str(link);
+    back=shell.run_line("cd -",capture=True);
+    assert back.out.strip()==str(home);
+    assert shell.get("OLDPWD")==str(link);
+    assert shell.run_line("cd -P sum; pwd",capture=True).out.strip()==str(project.resolve());
+
+
+def test_inherited_pwd_preserves_valid_symlink_path(tmp_path):
+    home=tmp_path/"home"; home.mkdir();
+    physical=tmp_path/"physical"; physical.mkdir();
+    link=home/"work"; link.symlink_to(physical,target_is_directory=True);
+    shell=ShellRuntime(env={"HOME":str(home),"PWD":str(link),"PATH":""},cwd=physical);
+    assert shell.logical_cwd==str(link);
+    assert shell.get("PWD")==str(link);
+    assert shell.run_line("pwd",capture=True).out.strip()==str(link);
+    assert shell.run_line("pwd -P",capture=True).out.strip()==str(physical.resolve());
+
+
 def test_find_grep_cut_rev_pipeline(tmp_path):
     (tmp_path/"a.bas").write_text("x",encoding="utf-8");
     (tmp_path/"B.BAS").write_text("y",encoding="utf-8");
@@ -412,10 +462,10 @@ def test_sum_shell_identity_does_not_overwrite_inherited_shell():
     shell=ShellRuntime(env={'SHELL':'/bin/bash'});
     assert shell.get('SHELL')=='/bin/bash';
     assert shell.get('SUM_SHELL');
-    assert shell.get('SUM_SHELL_VERSION')=='0.2.0a4';
+    assert shell.get('SUM_SHELL_VERSION')=='0.2.0a5';
     env=shell.environment();
     assert env['SHELL']=='/bin/bash';
-    assert env['SUM_SHELL_VERSION']=='0.2.0a4';
+    assert env['SUM_SHELL_VERSION']=='0.2.0a5';
 
 
 def test_fsa_logical_cwd_and_sumio_redirection(tmp_path):
@@ -635,7 +685,7 @@ def test_help_builtin_plain_index_and_topic():
     topic=shell.run_line("help cd",capture=True);
     assert topic.code==0;
     assert topic.out.startswith("CD\n==");
-    assert "cd [DIR]" in topic.out;
+    assert "cd [-L|-P] [DIR]" in topic.out;
 
 
 def test_help_builtin_unknown_topic_is_error():

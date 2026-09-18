@@ -2,9 +2,16 @@
 
 `sumbash` is SUM's portable shell and BusyBox-style multicall toolbox. The goal is not to clone every historical Bash corner in one step. The goal is to provide a useful, scriptable Unix-style environment with the same maintained implementation on Linux, Windows and Android, while falling back to host commands for specialised tools.
 
-Version `0.2.0a4` is the current compatibility-focused alpha line.
+Version `0.2.0a5` is the current compatibility-focused alpha line.
 
-`0.2.0a4` advances the navigable contextual-help integration to the grouped, mouse-aware `sumTUI 0.8.0a24` browser.  The in-place F1/Alt+H cursor marker introduced in 0.2.0a3 remains the trigger mechanism, so the pending readline buffer and cursor position survive opening and closing Help.
+`0.2.0a5` restores Bash-style logical directory semantics: `cd` preserves symlink components in `PWD`, while `cd -P` and `pwd -P` expose the physical filesystem path. The grouped, mouse-aware contextual-help integration from 0.2.0a4 remains unchanged.
+
+## Logical and physical directory navigation (0.2.0a5)
+
+- `cd DIR` and `cd -L DIR` preserve the logical path, including symlink components.
+- `cd -P DIR` resolves symlinks and stores the physical path in `PWD`.
+- `pwd` / `pwd -L` report the logical path; `pwd -P` reports the physical path.
+- A valid inherited `PWD` is preserved when it names the same directory as the process cwd.
 
 ## Navigable contextual help (0.2.0a4)
 

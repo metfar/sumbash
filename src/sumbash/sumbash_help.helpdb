@@ -112,13 +112,15 @@
       "category": "Navigation and shell state",
       "summary": "Change the current directory.",
       "syntax": [
-        "cd [DIR]",
-        "cd -"
+        "cd [-L|-P] [DIR]",
+        "cd [-L|-P] -"
       ],
       "example": "cd projects\ncd -",
       "notes": [
         "Without DIR, CD uses HOME.",
-        "`cd -` returns to OLDPWD and prints the resulting directory.",
+        "`cd` uses logical (`-L`) navigation by default and preserves symlink components in PWD.",
+        "`cd -P` resolves symlinks and uses the physical filesystem path.",
+        "`cd -` returns to OLDPWD and prints the resulting logical directory.",
         "`shopt -s cdspell` enables a conservative spelling correction when exactly one close directory match exists."
       ],
       "see_also": [
@@ -141,7 +143,8 @@
       ],
       "example": "pwd -P",
       "notes": [
-        "`pwd -P` resolves the physical filesystem path.",
+        "`pwd` and `pwd -L` print the logical path preserved by the shell.",
+        "`pwd -P` prints the resolved physical filesystem path.",
         "Logical path handling is provided through sumFSA."
       ],
       "see_also": [
@@ -420,4 +423,3 @@
     }
   ]
 }
-

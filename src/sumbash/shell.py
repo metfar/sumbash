@@ -9,7 +9,7 @@
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
 #
-"""Small portable shell core for sumbash 0.2.0a4.
+"""Small portable shell core for sumbash 0.2.0a5.
 
 This alpha intentionally implements a useful vertical slice: variables,
 expansion, arithmetic with fractions, command substitution, pipelines,
@@ -132,6 +132,17 @@ class ShellRuntime:
         self.cwd = str(Path(cwd or os.getcwd()).resolve());
         self.fsa = FileSystem(cwd=self.cwd,home=self.env.get("HOME") or str(Path.home()));
         self.logical_cwd = self.fsa.logical_path(self.cwd);
+        # Preserve an inherited logical PWD when it names the same directory as
+        # the process cwd.  os.getcwd() is physical on POSIX, so without this a
+        # shell started from ~/link would immediately forget the symlink path.
+        inherited_pwd=str(self.env.get("PWD","") or "").strip();
+        if inherited_pwd:
+            try:
+                inherited_logical=self.fsa.normalize(inherited_pwd,cwd=self.logical_cwd);
+                inherited_native=self.fsa.native_path(inherited_logical);
+                if os.path.samefile(inherited_native,self.cwd): self.logical_cwd=inherited_logical;
+            except (OSError,ValueError): pass;
+        self.fsa.native_cwd=self.cwd; self.fsa.cwd=self.logical_cwd;
         self.vars["PWD"] = self.logical_cwd;
         self.env["PWD"] = self.logical_cwd;
         self.argv = list(argv or []);
@@ -207,10 +218,11 @@ class ShellRuntime:
     def native_path(self, value):
         return self.fsa.native_path(self.logical_path(value));
 
-    def _set_cwd_native(self, native):
+    def _set_cwd_native(self, native, logical=None):
         self.cwd=str(Path(native).resolve());
         self.fsa.native_cwd=self.cwd;
-        self.logical_cwd=self.fsa.logical_path(self.cwd);
+        if logical is None: self.logical_cwd=self.fsa.logical_path(self.cwd);
+        else: self.logical_cwd=self.fsa.normalize(logical,cwd=self.logical_cwd);
         self.fsa.cwd=self.logical_cwd;
         return self.logical_cwd;
 
@@ -838,16 +850,45 @@ class ShellRuntime:
         return Execution(127,err="sumbash: {}: builtin unavailable\n".format(name));
 
     def _bi_cd(self,args):
-        target=args[0] if args else self.get("HOME") or self.fsa.home;
-        if target=="-": target=self.get("OLDPWD") or self.logical_cwd;
-        try: p=Path(self.native_path(target));
-        except Exception: p=Path(target).expanduser(); p=p if p.is_absolute() else Path(self.cwd)/p;
+        # Bash-compatible default: logical (-L) navigation preserves symlink
+        # components in PWD.  Physical (-P) navigation resolves them.
+        physical=False; operands=[]; index=0;
+        while index<len(args):
+            item=args[index];
+            if item=="--": operands.extend(args[index+1:]); break;
+            if item=="-L": physical=False; index+=1; continue;
+            if item=="-P": physical=True; index+=1; continue;
+            if item.startswith("-") and item!="-": return Execution(2,err="cd: {}: invalid option\n".format(item));
+            operands.extend(args[index:]); break;
+        if len(operands)>1: return Execution(1,err="cd: too many arguments\n");
+        requested=operands[0] if operands else self.get("HOME") or self.fsa.home;
+        print_result=requested=="-";
+        target=(self.get("OLDPWD") or self.logical_cwd) if print_result else requested;
+        try:
+            if physical and self.fsa.platform_name!="windows":
+                raw=str(target or "."); home=self.get("HOME") or self.fsa.home;
+                if raw=="~": raw=home;
+                elif raw.startswith("~/"): raw=os.path.join(home,raw[2:]);
+                p=Path(raw) if os.path.isabs(raw) else Path(self.cwd)/raw;
+                logical_target=None;
+            else:
+                logical_target=self.fsa.normalize(target,cwd=self.logical_cwd);
+                p=Path(self.fsa.native_path(logical_target));
+        except Exception:
+            p=Path(str(target)).expanduser(); p=p if p.is_absolute() else Path(self.cwd)/p; logical_target=None if physical else self.fsa.normalize(str(target),cwd=self.logical_cwd);
         if not p.is_dir() and self.options.get("cdspell"):
             parent=p.parent if p.parent.is_dir() else Path(self.cwd); choices=[x.name for x in parent.iterdir() if x.is_dir()]; match=difflib.get_close_matches(p.name,choices,n=2,cutoff=.72);
-            if len(match)==1: p=parent/match[0];
+            if len(match)==1:
+                p=parent/match[0];
+                if not physical and logical_target is not None: logical_target=self.fsa.normalize(match[0],cwd=self.fsa.parent(logical_target));
         if not p.is_dir(): return Execution(1,err="cd: {}: No such directory\n".format(target));
-        old=self.logical_cwd; new_cwd=self._set_cwd_native(str(p)); self.set_var("OLDPWD",old,export=True); self.set_var("PWD",new_cwd,export=True);
-        return Execution(out=(new_cwd+"\n") if args and args[0]=="-" else "");
+        old=self.logical_cwd;
+        if physical:
+            physical_path=str(p.resolve()); new_cwd=self._set_cwd_native(physical_path,logical=self.fsa.logical_path(physical_path));
+        else:
+            new_cwd=self._set_cwd_native(str(p),logical=logical_target);
+        self.set_var("OLDPWD",old,export=True); self.set_var("PWD",new_cwd,export=True);
+        return Execution(out=(new_cwd+"\n") if print_result else "");
 
     def _bi_assign(self,mode,args):
         if not args:
