@@ -12,6 +12,7 @@
 from __future__ import annotations;
 
 import argparse;
+from sumui.cli import SumArgumentParser;
 import os;
 from pathlib import Path;
 import shutil;
@@ -49,8 +50,11 @@ def _show_help(file=sys.stdout):
     print("  --link-mode MODE                auto|symlink|hardlink|copy",file=file);
     print("  --remove-links DIR              remove links/copies installed by sumbash",file=file);
     print("  --version                       show version",file=file);
+    print("  --list-themes                   list available SUM themes",file=file);
+    print("  --get-theme, --getTheme         show the preferred theme",file=file);
+    print("  --set-theme NAME, --setTheme    save preferred theme",file=file);
     print("",file=file);
-    print("0.2.0a5 preserves logical symlink paths for cd/pwd by default and provides explicit -P physical navigation.",file=file);
+    print("0.2.0a7 preserves logical symlink paths for cd/pwd by default and provides explicit -P physical navigation.",file=file);
     print("It includes indexed/associative arrays, for/while/until, if/elif/else, case,",file=file);
     print("shell functions with local/return, heredocs, braced groups, globbing, binary",file=file);
     print("pipelines, fractional arithmetic and external PATH fallback. Full Bash",file=file);
@@ -115,22 +119,38 @@ def _run_direct_applet(name,args):
     return result.code;
 
 
+def _meta_parser():
+    parser = SumArgumentParser(prog="sumbash", description="SUM portable shell and multicall toolbox", version=__version__, add_help=False, allow_abbrev=False);
+    parser.add_argument("-h", "--help", action="store_true");
+    parser.add_argument("--list-applets", action="store_true");
+    return parser;
+
+
+def _link_parser():
+    parser = SumArgumentParser(prog="sumbash", add_help=False, auto_version=False, allow_abbrev=False, theme_provider=None);
+    parser.add_argument("--link-mode", choices=("auto", "symlink", "hardlink", "copy"), default="auto");
+    parser.add_argument("-f", "--force", action="store_true");
+    return parser;
+
+
 def entry_point(arguments=None):
     argv0=sys.argv[0]; called=invocation_name(argv0); args=list(sys.argv[1:] if arguments is None else arguments);
     if called in APPLETS: return _run_direct_applet(called,args);
     if not args:
         return ShellRuntime(interactive=True,argv0="sumbash").interactive_loop();
-    if args[0] in ("-h","--help"): _show_help(); return 0;
-    if args[0]=="--version": print("sumbash {}".format(__version__)); return 0;
-    if args[0]=="--list-applets": print("\n".join(applet_names())); return 0;
+    if args[0] in ("-h", "--help", "--version", "--list-applets", "--list-themes", "--get-theme", "--getTheme", "--set-theme", "--setTheme") or args[0].startswith(("--set-theme=", "--setTheme=")):
+        try:
+            metadata = _meta_parser().parse_args(args);
+        except SystemExit as done:
+            return int(done.code or 0);
+        if metadata.help: _show_help(); return 0;
+        if metadata.list_applets: print("\n".join(applet_names())); return 0;
     if args[0] in ("--install-links","--remove-links"):
         action=args.pop(0);
         if not args: print("sumbash: {} requires DIR".format(action),file=sys.stderr); return 2;
-        directory=args.pop(0); mode="auto"; force=False; i=0;
-        while i<len(args):
-            if args[i]=="--link-mode" and i+1<len(args): mode=args[i+1]; i+=2; continue;
-            if args[i] in ("-f","--force"): force=True; i+=1; continue;
-            i+=1;
+        directory=args.pop(0);
+        parsed=_link_parser().parse_args(args);
+        mode=parsed.link_mode; force=parsed.force;
         try: return install_links(directory,argv0,mode,force) if action=="--install-links" else remove_links(directory,argv0);
         except (OSError,ValueError) as exc: print("sumbash: {}".format(exc),file=sys.stderr); return 2;
     if args[0]=="--link-mode":
